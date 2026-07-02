@@ -83,12 +83,16 @@ defmodule RiceWeb.SemiAuthController do
     with {:ok, tokens} <- SemiOAuth.exchange_code(code, verifier),
          {:ok, user} <- SemiOAuth.fetch_userinfo(tokens["access_token"]),
          {:ok, atproto} <- Rice.Bridge.session_for(user) do
+      # Hand the minted PDS session to the front-end via a one-time ticket and
+      # redirect there so the user lands logged in. rice's own session is also
+      # set (a debug view at rice.together.li/), but the destination is the app.
+      ticket = Rice.Handoff.put(handoff_payload(atproto))
+
       conn
       |> reset_pkce()
       |> put_session(:semi_user, Map.take(user, semi_display_keys()))
       |> put_session(:atproto, %{"did" => atproto.did, "handle" => atproto.handle})
-      |> put_flash(:info, "已通过 Semi 登录 · AT Protocol 账号 @#{atproto.handle}")
-      |> redirect(to: ~p"/")
+      |> redirect(external: handoff_target() <> "?ticket=" <> ticket)
     else
       {:error, reason} ->
         conn
@@ -97,6 +101,34 @@ defmodule RiceWeb.SemiAuthController do
         |> redirect(to: ~p"/")
     end
   end
+
+  # Redeem a handoff ticket for the PDS session (one-time, CORS-scoped to the
+  # front-end origin). Called cross-origin by the social-app /semi-callback screen.
+  def session(conn, %{"ticket" => ticket}) do
+    conn =
+      conn
+      |> put_resp_header("access-control-allow-origin", handoff_origin())
+      |> put_resp_header("vary", "origin")
+      |> put_resp_header("cache-control", "no-store")
+
+    case Rice.Handoff.take(ticket) do
+      {:ok, payload} -> json(conn, payload)
+      :error -> conn |> put_status(:not_found) |> json(%{error: "invalid_or_expired_ticket"})
+    end
+  end
+
+  defp handoff_payload(atproto) do
+    %{
+      "service" => Application.fetch_env!(:rice, :pds)[:public_url],
+      "did" => atproto.did,
+      "handle" => atproto.handle,
+      "accessJwt" => atproto.access_jwt,
+      "refreshJwt" => atproto.refresh_jwt
+    }
+  end
+
+  defp handoff_target, do: Application.fetch_env!(:rice, :handoff)[:target_url]
+  defp handoff_origin, do: Application.fetch_env!(:rice, :handoff)[:allowed_origin]
 
   defp semi_display_keys,
     do: ~w(sub handle wallet_address phone_verified email_verified scopes_granted)

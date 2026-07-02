@@ -26,6 +26,14 @@ defmodule RiceWeb.Router do
     get "/logout", SemiAuthController, :logout
   end
 
+  # One-time session-handoff redemption for the front-end (cross-origin JSON,
+  # CORS handled in the action). No session/CSRF pipeline needed.
+  scope "/", RiceWeb do
+    pipe_through :api
+
+    get "/session/:ticket", SemiAuthController, :session
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", RiceWeb do
   #   pipe_through :api

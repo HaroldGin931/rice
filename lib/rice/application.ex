@@ -12,8 +12,8 @@ defmodule Rice.Application do
       Rice.Repo,
       {DNSCluster, query: Application.get_env(:rice, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Rice.PubSub},
-      # Start a worker by calling: Rice.Worker.start_link(arg)
-      # {Rice.Worker, arg},
+      # One-time session-handoff ticket store (Semi → social-app login).
+      Rice.Handoff,
       # Start to serve requests, typically the last entry
       RiceWeb.Endpoint
     ]

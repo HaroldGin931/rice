@@ -40,11 +40,21 @@ config :rice, :semi,
   issuer: System.get_env("SEMI_ISSUER") || "https://api.semi.im"
 
 # AT Protocol PDS the identity bridge provisions/logs into. On the deployed
-# host the PDS is reachable directly (host networking, no Cloudflare hop).
+# host the PDS is reachable directly (host networking, no Cloudflare hop) for
+# rice's own calls; `public_url` is the browser-facing PDS URL handed to the
+# front-end so its Agent talks to the same PDS.
 config :rice, :pds,
   base_url: System.get_env("PDS_BASE_URL") || "http://127.0.0.1:3200",
+  public_url: System.get_env("PDS_PUBLIC_URL") || "https://web5.together.li",
   handle_domain: System.get_env("PDS_HANDLE_DOMAIN") || "web5.together.li",
   email_domain: System.get_env("PDS_EMAIL_DOMAIN") || "web5.together.li"
+
+# Session handoff to the front-end (social-app). After the bridge mints a PDS
+# session, rice redirects the browser here with a one-time ticket the app
+# redeems cross-origin; `allowed_origin` scopes the redeem endpoint's CORS.
+config :rice, :handoff,
+  target_url: System.get_env("HANDOFF_URL") || "https://together.li/semi-callback",
+  allowed_origin: System.get_env("HANDOFF_ALLOWED_ORIGIN") || "https://together.li"
 
 # Key for encrypting stored account passwords at rest (32 raw bytes,
 # base64-encoded in RICE_LINK_ENC_KEY). Left nil when unset so non-bridge
