@@ -18,6 +18,12 @@ defmodule RiceWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+
+    # "Login with Semi" (OAuth 2.0 Authorization Code + PKCE).
+    # /callback is the redirect_uri registered with the Semi OAuth app.
+    get "/login", SemiAuthController, :login
+    get "/callback", SemiAuthController, :callback
+    get "/logout", SemiAuthController, :logout
   end
 
   # Other scopes may use custom stacks.

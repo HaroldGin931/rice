@@ -22,6 +22,20 @@ end
 
 config :rice, RiceWeb.Endpoint, http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+# Semi OAuth 2.0 / OIDC provider ("Login with Semi"). rice is a confidential
+# client: it holds the client_secret and performs the code→token exchange
+# server-side. Secrets come from env (SEMI_* injected via the secret/xjdao
+# Nomad Variable in production); the non-secret defaults match the registered
+# OAuth app. Read for all envs so local dev works when the env vars are set.
+config :rice, :semi,
+  client_id: System.get_env("SEMI_CLIENT_ID"),
+  client_secret: System.get_env("SEMI_CLIENT_SECRET"),
+  redirect_uri: System.get_env("SEMI_REDIRECT_URI") || "https://rice.together.li/callback",
+  # All OAuth/OIDC endpoints (authorize, token, userinfo) live under the issuer,
+  # per https://api.semi.im/.well-known/openid-configuration. Overridable for
+  # local Semi dev.
+  issuer: System.get_env("SEMI_ISSUER") || "https://api.semi.im"
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
