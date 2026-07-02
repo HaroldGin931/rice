@@ -62,7 +62,9 @@ defmodule Rice.SemiOAuth do
         "code_challenge_method" => "S256"
       })
 
-    trim(cfg[:issuer]) <> "/oauth/authorize?" <> query
+    # Browser must hit the frontend consent page, NOT the API (which returns
+    # JSON metadata instead of rendering the consent UI).
+    trim(cfg[:authorize_base]) <> "/oauth/authorize?" <> query
   end
 
   # ── Token exchange ──────────────────────────────────────────────────────

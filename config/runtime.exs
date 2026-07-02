@@ -31,9 +31,12 @@ config :rice, :semi,
   client_id: System.get_env("SEMI_CLIENT_ID"),
   client_secret: System.get_env("SEMI_CLIENT_SECRET"),
   redirect_uri: System.get_env("SEMI_REDIRECT_URI") || "https://rice.together.li/callback",
-  # All OAuth/OIDC endpoints (authorize, token, userinfo) live under the issuer,
-  # per https://api.semi.im/.well-known/openid-configuration. Overridable for
-  # local Semi dev.
+  # The browser-facing consent page is served by the Semi *frontend*
+  # (www.semi.im/oauth/authorize renders HTML). The API host
+  # (api.semi.im/oauth/authorize) only returns JSON consent metadata — the
+  # OIDC discovery doc lists it as `authorization_endpoint`, but it's not where
+  # a human browser should land. Token/userinfo are on the API (issuer).
+  authorize_base: System.get_env("SEMI_FRONTEND_URL") || "https://www.semi.im",
   issuer: System.get_env("SEMI_ISSUER") || "https://api.semi.im"
 
 # AT Protocol PDS the identity bridge provisions/logs into. On the deployed
