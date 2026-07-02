@@ -74,17 +74,20 @@ defmodule RiceWeb.SemiAuthController do
   def logout(conn, _params) do
     conn
     |> delete_session(:semi_user)
+    |> delete_session(:atproto)
     |> put_flash(:info, "已退出登录")
     |> redirect(to: ~p"/")
   end
 
   defp complete_login(conn, code, verifier) do
     with {:ok, tokens} <- SemiOAuth.exchange_code(code, verifier),
-         {:ok, user} <- SemiOAuth.fetch_userinfo(tokens["access_token"]) do
+         {:ok, user} <- SemiOAuth.fetch_userinfo(tokens["access_token"]),
+         {:ok, atproto} <- Rice.Bridge.session_for(user) do
       conn
       |> reset_pkce()
-      |> put_session(:semi_user, user)
-      |> put_flash(:info, "已通过 Semi 登录")
+      |> put_session(:semi_user, Map.take(user, semi_display_keys()))
+      |> put_session(:atproto, %{"did" => atproto.did, "handle" => atproto.handle})
+      |> put_flash(:info, "已通过 Semi 登录 · AT Protocol 账号 @#{atproto.handle}")
       |> redirect(to: ~p"/")
     else
       {:error, reason} ->
@@ -94,6 +97,9 @@ defmodule RiceWeb.SemiAuthController do
         |> redirect(to: ~p"/")
     end
   end
+
+  defp semi_display_keys,
+    do: ~w(sub handle wallet_address phone_verified email_verified scopes_granted)
 
   defp reset_pkce(conn) do
     conn
@@ -108,6 +114,13 @@ defmodule RiceWeb.SemiAuthController do
     do: "获取用户信息返回 #{status} (#{message_of(body)})"
 
   defp describe({:transport, _reason}), do: "无法连接到 Semi 服务器"
+
+  # Bridge (PDS) failures.
+  defp describe({:provision, reason}), do: "创建 AT Protocol 账号失败: #{describe(reason)}"
+  defp describe({:login, reason}), do: "登录 AT Protocol 账号失败: #{describe(reason)}"
+  defp describe({:pds, _method, status, msg}), do: "PDS 返回 #{status} (#{msg})"
+  defp describe({:persist, _changeset}), do: "保存账号映射失败"
+  defp describe(:decrypt_failed), do: "凭据解密失败"
   defp describe(other), do: inspect(other)
 
   defp message_of(%{"error_description" => d}) when is_binary(d), do: d

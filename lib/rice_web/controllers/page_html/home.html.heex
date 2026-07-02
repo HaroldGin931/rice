@@ -35,6 +35,18 @@
           </div>
         </dl>
 
+        <%= if @atproto do %>
+          <div class="mt-5 rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-left dark:border-indigo-900 dark:bg-indigo-950/40">
+            <p class="text-xs font-semibold tracking-wide text-indigo-700 uppercase dark:text-indigo-300">
+              AT Protocol 账号
+            </p>
+            <p class="mt-1 font-semibold">@{@atproto["handle"]}</p>
+            <p class="mt-0.5 font-mono text-xs break-all text-zinc-500 dark:text-zinc-400">
+              {@atproto["did"]}
+            </p>
+          </div>
+        <% end %>
+
         <a
           href={~p"/logout"}
           class="mt-6 inline-flex w-full items-center justify-center rounded-lg bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700"

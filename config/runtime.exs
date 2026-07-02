@@ -36,6 +36,25 @@ config :rice, :semi,
   # local Semi dev.
   issuer: System.get_env("SEMI_ISSUER") || "https://api.semi.im"
 
+# AT Protocol PDS the identity bridge provisions/logs into. On the deployed
+# host the PDS is reachable directly (host networking, no Cloudflare hop).
+config :rice, :pds,
+  base_url: System.get_env("PDS_BASE_URL") || "http://127.0.0.1:3200",
+  handle_domain: System.get_env("PDS_HANDLE_DOMAIN") || "web5.together.li",
+  email_domain: System.get_env("PDS_EMAIL_DOMAIN") || "web5.together.li"
+
+# Key for encrypting stored account passwords at rest (32 raw bytes,
+# base64-encoded in RICE_LINK_ENC_KEY). Left nil when unset so non-bridge
+# environments boot fine; Rice.Vault raises only if actually used.
+rice_link_enc_key =
+  case System.get_env("RICE_LINK_ENC_KEY") do
+    nil -> nil
+    "" -> nil
+    b64 -> Base.decode64!(b64)
+  end
+
+config :rice, Rice.Vault, key: rice_link_enc_key
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
