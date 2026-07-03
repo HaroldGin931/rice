@@ -56,6 +56,26 @@ config :rice, :handoff,
   target_url: System.get_env("HANDOFF_URL") || "https://together.li/semi-callback",
   allowed_origin: System.get_env("HANDOFF_ALLOWED_ORIGIN") || "https://together.li"
 
+# xiangjiandao DAO backend integration: rice provisions t_user rows and signs
+# the "daoJwt" the social-app uses for DAO API calls, replacing the DAO
+# backend's own login-token issuance for Semi users. Enabled only when
+# DAO_MYSQL_PASSWORD is set (see Rice.Dao / Rice.Application.dao_children).
+config :rice, :dao,
+  mysql_host: System.get_env("DAO_MYSQL_HOST") || "127.0.0.1",
+  mysql_port: String.to_integer(System.get_env("DAO_MYSQL_PORT") || "3306"),
+  mysql_user: System.get_env("DAO_MYSQL_USER") || "xiangjiandao",
+  mysql_password: System.get_env("DAO_MYSQL_PASSWORD"),
+  mysql_database: System.get_env("DAO_MYSQL_DATABASE") || "xiangjiandao",
+  redis_host: System.get_env("DAO_REDIS_HOST") || "127.0.0.1",
+  redis_port: String.to_integer(System.get_env("DAO_REDIS_PORT") || "6379"),
+  redis_password: System.get_env("DAO_REDIS_PASSWORD"),
+  redis_database: String.to_integer(System.get_env("DAO_REDIS_DATABASE") || "1"),
+  # Mirror the DAO backend's Jwt__* env (issuer/audience are not validated
+  # by the .NET side, kept identical for fidelity; 43200 min = 30 days).
+  jwt_issuer: System.get_env("DAO_JWT_ISSUER") || "xiangjiandao",
+  jwt_audience: System.get_env("DAO_JWT_AUDIENCE") || "account",
+  jwt_exp_minutes: String.to_integer(System.get_env("DAO_JWT_EXP_MINUTES") || "43200")
+
 # Key for encrypting stored account passwords at rest (32 raw bytes,
 # base64-encoded in RICE_LINK_ENC_KEY). Left nil when unset so non-bridge
 # environments boot fine; Rice.Vault raises only if actually used.

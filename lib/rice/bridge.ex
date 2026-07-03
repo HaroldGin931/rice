@@ -21,7 +21,22 @@ defmodule Rice.Bridge do
 
     with {:ok, identity} <- result do
       ensure_profile(identity, userinfo)
-      {:ok, identity}
+      {:ok, Map.put(identity, :dao_jwt, dao_jwt(identity, userinfo))}
+    end
+  end
+
+  # Best-effort DAO token (t_user row + RS256 daoJwt). A Semi login without
+  # it still yields a working AT Protocol session; DAO features need it.
+  defp dao_jwt(identity, userinfo) do
+    if Rice.Dao.enabled?() do
+      case Rice.Dao.token_for(identity, userinfo) do
+        {:ok, token} ->
+          token
+
+        {:error, reason} ->
+          Logger.warning("bridge: dao token failed for #{identity.did}: #{inspect(reason)}")
+          nil
+      end
     end
   end
 

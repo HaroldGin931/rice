@@ -18,10 +18,39 @@ defmodule Rice.Application do
       RiceWeb.Endpoint
     ]
 
+    children = children ++ dao_children()
+
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Rice.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # DAO backend connections (MySQL t_user + Redis JWKS) — only started when
+  # configured (DAO_MYSQL_PASSWORD set); dev without the DAO stack runs fine.
+  defp dao_children do
+    cfg = Application.get_env(:rice, :dao, [])
+
+    if cfg[:mysql_password] not in [nil, ""] do
+      [
+        {MyXQL,
+         name: Rice.DaoSql,
+         hostname: cfg[:mysql_host],
+         port: cfg[:mysql_port],
+         username: cfg[:mysql_user],
+         password: cfg[:mysql_password],
+         database: cfg[:mysql_database],
+         pool_size: 2},
+        {Redix,
+         name: Rice.DaoRedis,
+         host: cfg[:redis_host],
+         port: cfg[:redis_port],
+         password: cfg[:redis_password],
+         database: cfg[:redis_database]}
+      ]
+    else
+      []
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration

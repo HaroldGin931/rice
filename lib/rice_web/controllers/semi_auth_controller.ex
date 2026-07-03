@@ -118,13 +118,20 @@ defmodule RiceWeb.SemiAuthController do
   end
 
   defp handoff_payload(atproto) do
-    %{
+    payload = %{
       "service" => Application.fetch_env!(:rice, :pds)[:public_url],
       "did" => atproto.did,
       "handle" => atproto.handle,
       "accessJwt" => atproto.access_jwt,
       "refreshJwt" => atproto.refresh_jwt
     }
+
+    # DAO backend token ("Bearer <jwt>") — present unless DAO integration is
+    # disabled or failed; the app's DAO features (任务/商品/发帖) need it.
+    case Map.get(atproto, :dao_jwt) do
+      nil -> payload
+      dao_jwt -> Map.put(payload, "daoJwt", dao_jwt)
+    end
   end
 
   defp handoff_target, do: Application.fetch_env!(:rice, :handoff)[:target_url]
