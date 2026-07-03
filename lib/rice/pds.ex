@@ -22,6 +22,43 @@ defmodule Rice.PDS do
     })
   end
 
+  @doc "com.atproto.repo.getRecord for the actor's profile. {:ok, record} | :missing | {:error, _}."
+  def get_profile(access_jwt, did) do
+    url =
+      base_url() <>
+        "/xrpc/com.atproto.repo.getRecord?" <>
+        URI.encode_query(%{
+          "repo" => did,
+          "collection" => "app.bsky.actor.profile",
+          "rkey" => "self"
+        })
+
+    case Req.get(url, auth: {:bearer, access_jwt}, receive_timeout: 20_000) do
+      {:ok, %{status: 200, body: %{"value" => record}}} -> {:ok, record}
+      {:ok, %{status: 400, body: %{"error" => "RecordNotFound"}}} -> :missing
+      {:ok, %{status: status, body: body}} -> {:error, {:pds, "getRecord", status, xrpc_error(body)}}
+      {:error, reason} -> {:error, {:transport, reason}}
+    end
+  end
+
+  @doc "com.atproto.repo.putRecord — write the actor's profile record."
+  def put_profile(access_jwt, did, %{} = record) do
+    url = base_url() <> "/xrpc/com.atproto.repo.putRecord"
+
+    body = %{
+      "repo" => did,
+      "collection" => "app.bsky.actor.profile",
+      "rkey" => "self",
+      "record" => Map.put(record, "$type", "app.bsky.actor.profile")
+    }
+
+    case Req.post(url, json: body, auth: {:bearer, access_jwt}, receive_timeout: 20_000) do
+      {:ok, %{status: 200, body: ok}} -> {:ok, ok}
+      {:ok, %{status: status, body: body}} -> {:error, {:pds, "putRecord", status, xrpc_error(body)}}
+      {:error, reason} -> {:error, {:transport, reason}}
+    end
+  end
+
   # Both procedures return the same success shape: did/handle/accessJwt/refreshJwt.
   defp post(method, body) do
     url = base_url() <> "/xrpc/" <> method

@@ -10,11 +10,52 @@ defmodule Rice.Bridge do
   Returns `{:ok, %{did, handle, access_jwt, refresh_jwt}}` or `{:error, reason}`.
   """
   alias Rice.{Accounts, PDS, Vault}
+  require Logger
 
   def session_for(%{"sub" => sub} = userinfo) when is_binary(sub) do
-    case Accounts.get_link_by_sub(sub) do
-      nil -> provision(sub, userinfo)
-      link -> login_existing(link)
+    result =
+      case Accounts.get_link_by_sub(sub) do
+        nil -> provision(sub, userinfo)
+        link -> login_existing(link)
+      end
+
+    with {:ok, identity} <- result do
+      ensure_profile(identity, userinfo)
+      {:ok, identity}
+    end
+  end
+
+  # Write an initial app.bsky.actor.profile if the account has none — covers
+  # both freshly provisioned accounts and older ones created before profile
+  # bootstrap existed. Never overwrites an existing profile (the user may have
+  # edited it in the app), and never fails the login: profile is cosmetic.
+  defp ensure_profile(identity, userinfo) do
+    case PDS.get_profile(identity.access_jwt, identity.did) do
+      :missing ->
+        display_name = display_name(userinfo, identity.handle)
+
+        case PDS.put_profile(identity.access_jwt, identity.did, %{"displayName" => display_name}) do
+          {:ok, _} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("bridge: profile bootstrap failed for #{identity.did}: #{inspect(reason)}")
+        end
+
+      {:ok, _record} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("bridge: profile check failed for #{identity.did}: #{inspect(reason)}")
+    end
+  end
+
+  # Semi userinfo has no nickname/avatar; the best initial display name is the
+  # Semi handle, falling back to the first label of the PDS handle.
+  defp display_name(userinfo, pds_handle) do
+    case String.trim(userinfo["handle"] || "") do
+      "" -> pds_handle |> String.split(".") |> hd()
+      s -> String.slice(s, 0, 64)
     end
   end
 
