@@ -112,6 +112,37 @@ if config_env() == :prod do
   # 附件落盘位置。必须是容器外挂载进来的卷,否则重新部署就全丢。
   config :rice, :storage_root, System.get_env("STORAGE_ROOT") || "/srv/rice/storage"
 
+  # 验证码外发。注册 / 找回密码 / 改绑 / 注销都靠它。
+  # 两个通道各自独立:哪个没配全,`Rice.Notifications.Dispatcher` 就把那一个
+  # 退回日志实现,并打一条 warning —— 不会因为少配一个通道就让另一个也用不了。
+  config :rice, :notifications, Rice.Notifications.Dispatcher
+
+  config :rice, Rice.Notifications.AliyunSms,
+    access_key_id: System.get_env("ALIYUN_SMS_ACCESS_KEY_ID"),
+    access_key_secret: System.get_env("ALIYUN_SMS_ACCESS_KEY_SECRET"),
+    sign_name: System.get_env("ALIYUN_SMS_SIGN_NAME"),
+    template_code: System.get_env("ALIYUN_SMS_TEMPLATE_CODE"),
+    endpoint: System.get_env("ALIYUN_SMS_ENDPOINT") || "https://dysmsapi.aliyuncs.com"
+
+  config :rice, Rice.Notifications.Smtp,
+    sender_name: System.get_env("SMTP_SENDER_NAME") || "乡建DAO",
+    sender_address: System.get_env("SMTP_SENDER_ADDRESS") || "no-reply@xjdao.xyz"
+
+  if smtp_relay = System.get_env("SMTP_RELAY") do
+    config :rice, Rice.Mailer,
+      adapter: Swoosh.Adapters.SMTP,
+      relay: smtp_relay,
+      port: String.to_integer(System.get_env("SMTP_PORT") || "587"),
+      username: System.get_env("SMTP_USERNAME"),
+      password: System.get_env("SMTP_PASSWORD"),
+      # StartTls,和 core 的 SecureSocketOptions 默认值一致
+      tls: :always,
+      auth: :always,
+      retries: 1
+
+    config :swoosh, :api_client, Swoosh.ApiClient.Req
+  end
+
   # Oban 在生产默认**完全关闭**(不起队列、不起插件 = 不碰数据库),要等
   # priv/repo/migrations 里的 oban 迁移在目标库跑过之后,再设 OBAN_ENABLED=true 打开。
   # 这样即便在迁移前误部署,rice 也只是没有后台任务,不会启动失败。

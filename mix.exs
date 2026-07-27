@@ -61,6 +61,8 @@ defmodule Rice.MixProject do
        compile: false,
        depth: 1},
       {:swoosh, "~> 1.16"},
+      # SMTP 发信。core 用 MailKit,这里走 Swoosh 的 SMTP adapter。
+      {:gen_smtp, "~> 1.2"},
       {:req, "~> 0.5"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},

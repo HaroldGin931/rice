@@ -41,11 +41,11 @@ defmodule Rice.Community do
   end
 
   @doc """
-  勋章全集,附上当前用户的获得时间(没获得就是 nil)。勋章墙要把没拿到的
+  勋章全集,附上**指定用户**的获得时间(没获得就是 nil)。勋章墙要把没拿到的
   也灰着显示出来 —— core 是让 `/user-medal/page` 同时返回已获得和未获得,
   再靠 `getTime` 是不是 null 区分,这里把这层含义放进了 `awarded_at`。
 
-  未登录时全部为 nil。
+  传 nil 就是"谁也不是",全部为 nil。
   """
   def list_badges(user \\ nil) do
     awarded =

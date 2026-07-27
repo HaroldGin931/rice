@@ -51,6 +51,25 @@ defmodule Rice.Accounts do
 
   def get_user_by_identifier(_), do: nil
 
+  @doc """
+  按公开标识找人:rice id / DID / handle。
+
+  刻意**不认邮箱和手机号** —— `get_user_by_identifier/1` 认,那是登录用的。
+  公开接口上认联系方式就等于送了一个"这个邮箱注册过没有"的探测器。
+  """
+  def get_public_user(identifier) when is_binary(identifier) do
+    identifier = String.trim(identifier)
+
+    get_user(identifier) || get_user_by_did(identifier) ||
+      Repo.one(
+        from u in active_users(),
+          where: fragment("lower(?)", u.handle) == ^String.downcase(identifier),
+          preload: [:avatar]
+      )
+  end
+
+  def get_public_user(_), do: nil
+
   # 软删的行留在库里(外键要指得到),但任何查询都不该看见它们
   defp active_users, do: from(u in User, where: is_nil(u.deleted_at))
 

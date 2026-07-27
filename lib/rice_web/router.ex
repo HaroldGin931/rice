@@ -66,8 +66,8 @@ defmodule RiceWeb.Router do
     # 期 4:节点、勋章与发放记录(公开可读)
     get "/nodes", NodeController, :index
 
-    # 勋章全集。登录时会带上自己的 awarded_at,所以放在 :api 而不是匿名管线外。
-    get "/badges", BadgeController, :index
+    # 某人的勋章墙。:user_id 认 "me" / rice id / DID / handle。
+    get "/users/:user_id/badges", BadgeController, :index
     get "/nodes/members", NodeController, :members
     get "/grain_grants", GrainGrantController, :index
 
@@ -88,8 +88,6 @@ defmodule RiceWeb.Router do
     delete "/users/me", UserController, :delete
     put "/users/me/phone", UserController, :update_phone
     put "/users/me/email", UserController, :update_email
-
-    get "/users/me/badges", BadgeController, :mine
 
     # 期 4:稻米。明细只能看自己的,转账当然要登录。
     get "/grain_transfers", GrainTransferController, :index
