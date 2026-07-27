@@ -11,6 +11,24 @@ config :rice,
   ecto_repos: [Rice.Repo],
   generators: [timestamp_type: :utc_datetime]
 
+# 附件字节的落盘位置。生产在 runtime.exs 里覆盖成挂载出来的卷。
+config :rice, :storage_root, Path.expand("../priv/storage", __DIR__)
+
+# 后台任务。替代 core 的 Hangfire + Redis —— 任务表与业务表同库,
+# 可以和业务写入放进同一个 Ecto.Multi,天然就是 outbox。
+config :rice, Oban,
+  repo: Rice.Repo,
+  engine: Oban.Engines.Basic,
+  queues: [default: 5],
+  plugins: [
+    {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7},
+    # core 用 Hangfire 每分钟跑一次 ProposalEndJob
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"* * * * *", Rice.Workers.CloseProposals}
+     ]}
+  ]
+
 # Configure the endpoint
 config :rice, RiceWeb.Endpoint,
   url: [host: "localhost"],

@@ -47,7 +47,10 @@ config :rice, :pds,
   base_url: System.get_env("PDS_BASE_URL") || "http://127.0.0.1:3200",
   public_url: System.get_env("PDS_PUBLIC_URL") || "https://web5.together.li",
   handle_domain: System.get_env("PDS_HANDLE_DOMAIN") || "web5.together.li",
-  email_domain: System.get_env("PDS_EMAIL_DOMAIN") || "web5.together.li"
+  email_domain: System.get_env("PDS_EMAIL_DOMAIN") || "web5.together.li",
+  # 重置密码要调 com.atproto.admin.*。注意 PDS 那边要的是完整的 Basic 头,
+  # 这里只存密码,Rice.PDS.admin_auth/0 负责拼。
+  admin_password: System.get_env("PDS_ADMIN_PASSWORD")
 
 # Session handoff to the front-end (social-app). After the bridge mints a PDS
 # session, rice redirects the browser here with a one-time ticket the app
@@ -105,6 +108,16 @@ if config_env() == :prod do
     # For machines with several cores, consider starting multiple pools of `pool_size`
     # pool_count: 4,
     socket_options: maybe_ipv6
+
+  # 附件落盘位置。必须是容器外挂载进来的卷,否则重新部署就全丢。
+  config :rice, :storage_root, System.get_env("STORAGE_ROOT") || "/srv/rice/storage"
+
+  # Oban 在生产默认**完全关闭**(不起队列、不起插件 = 不碰数据库),要等
+  # priv/repo/migrations 里的 oban 迁移在目标库跑过之后,再设 OBAN_ENABLED=true 打开。
+  # 这样即便在迁移前误部署,rice 也只是没有后台任务,不会启动失败。
+  if System.get_env("OBAN_ENABLED") not in ~w(true 1) do
+    config :rice, Oban, queues: false, plugins: false
+  end
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

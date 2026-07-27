@@ -67,7 +67,11 @@ defmodule Rice.MixProject do
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"}
+      {:bandit, "~> 1.5"},
+      # 后台任务(替代 core 的 Hangfire + Redis),任务表与业务表同库同事务
+      {:oban, "~> 2.19"},
+      # 外部依赖(PDS / 短信 / 邮件)在测试里打桩,不打真实服务
+      {:mox, "~> 1.2", only: :test}
     ]
   end
 

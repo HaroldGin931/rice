@@ -20,8 +20,6 @@ defmodule Rice.Dao do
   Callers treat failures as non-fatal: a Semi login without a daoJwt still
   yields a working AT Protocol session.
   """
-  require Logger
-
   @jwks_redis_key "netcorepal:jwtsettings"
 
   def enabled? do
@@ -57,7 +55,9 @@ defmodule Rice.Dao do
   defp insert_user(identity, userinfo) do
     id = Ecto.UUID.generate()
     nick = nick_name(userinfo, identity.handle)
-    email = identity.handle |> String.split(".") |> hd() |> Kernel.<>("@" <> Rice.PDS.email_domain())
+
+    email =
+      identity.handle |> String.split(".") |> hd() |> Kernel.<>("@" <> Rice.PDS.email_domain())
 
     sql = """
     INSERT INTO t_user
@@ -87,7 +87,9 @@ defmodule Rice.Dao do
       cfg = config()
       now = System.os_time(:second)
       exp = now + cfg[:jwt_exp_minutes] * 60
-      email = identity.handle |> String.split(".") |> hd() |> Kernel.<>("@" <> Rice.PDS.email_domain())
+
+      email =
+        identity.handle |> String.split(".") |> hd() |> Kernel.<>("@" <> Rice.PDS.email_domain())
 
       header = %{"alg" => "RS256", "typ" => "JWT", "kid" => kid}
 
@@ -115,7 +117,8 @@ defmodule Rice.Dao do
   end
 
   defp current_jwk do
-    with {:ok, json} when is_binary(json) <- Redix.command(Rice.DaoRedis, ["GET", @jwks_redis_key]),
+    with {:ok, json} when is_binary(json) <-
+           Redix.command(Rice.DaoRedis, ["GET", @jwks_redis_key]),
          {:ok, [_ | _] = keys} <- Jason.decode(json) do
       {:ok, List.last(keys)}
     else

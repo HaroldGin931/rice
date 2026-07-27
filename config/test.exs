@@ -20,6 +20,17 @@ config :rice, RiceWeb.Endpoint,
   secret_key_base: "m2OUuTMsfbDK+sXBVLrGLHN32ya2ILNcYkuHYaxhOMjEhdbiH/ginZoOWFhIgx6Z",
   server: false
 
+# 外部依赖全部走 Mox 打桩:测试不碰磁盘、不打 PDS、不发短信
+config :rice, :pds_client, Rice.PDSMock
+config :rice, :notifications, Rice.NotificationsMock
+
+# 附件走 Mox 打桩,测试不碰磁盘
+config :rice, :storage, Rice.Files.StorageMock
+config :rice, :storage_root, Path.expand("../tmp/test_storage", __DIR__)
+
+# 测试里任务不自动跑,由测试用 Oban.drain_queue/1 显式驱动
+config :rice, Oban, testing: :manual
+
 # In test we don't send emails
 config :rice, Rice.Mailer, adapter: Swoosh.Adapters.Test
 

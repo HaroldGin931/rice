@@ -26,6 +26,7 @@ defmodule Rice.SemiOAuth do
   @doc "True once the OAuth app credentials are configured."
   def configured? do
     cfg = config()
+
     is_binary(cfg[:client_id]) and cfg[:client_id] != "" and
       is_binary(cfg[:client_secret]) and cfg[:client_secret] != ""
   end

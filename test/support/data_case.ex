@@ -24,6 +24,7 @@ defmodule Rice.DataCase do
       import Ecto.Changeset
       import Ecto.Query
       import Rice.DataCase
+      import Rice.Fixtures
     end
   end
 

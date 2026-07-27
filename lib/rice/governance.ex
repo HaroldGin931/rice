@@ -1,0 +1,254 @@
+defmodule Rice.Governance do
+  @moduledoc """
+  提案、投票、评论。
+
+  结票逻辑:到 `closes_at` 时,同意票数达到 `site_settings.proposal_approval_votes`
+  即 `passed`,否则 `rejected`。core 用 Hangfire 每分钟跑一次 `ProposalEndJob`
+  (任务状态存 Redis);这里换成 Oban 的 cron,任务表和业务表同库同事务。
+  """
+  import Ecto.Query
+
+  alias Ecto.Multi
+  alias Rice.Accounts.User
+  alias Rice.Governance.{Comment, Proposal, Vote}
+  alias Rice.{Pagination, Repo}
+
+  # ── 提案 ────────────────────────────────────────────────────────────────
+
+  def list_proposals(params \\ %{}) do
+    base()
+    |> filter_status(params["status"])
+    |> filter_author(params["user_id"])
+    |> Pagination.paginate(Repo, Pagination.params(params))
+  end
+
+  @doc """
+  与当前用户相关的提案。`mine` 决定关系:
+
+    * `"created"`(默认)—— 我发起的
+    * `"voted"` —— 我投过票的
+    * `"all"` —— 前两者的并集
+
+  core 那边是 `/proposal/my-proposal-list` 的数字 `type`(0/1/2)。
+  """
+  def list_my_proposals(%User{id: id}, params \\ %{}) do
+    base()
+    |> filter_status(params["status"])
+    |> scope_mine(id, params["mine"])
+    |> Pagination.paginate(Repo, Pagination.params(params))
+  end
+
+  defp base do
+    from p in Proposal,
+      as: :proposal,
+      where: is_nil(p.deleted_at) and p.listed == true,
+      preload: [:attachment, user: :avatar]
+  end
+
+  # 用 EXISTS 而不是 join —— join 会让投过多次的提案重复出现,再靠 distinct 去重
+  # 又会和游标分页的 order_by 打架。
+  defp voted_by(user_id) do
+    from v in Vote,
+      where: v.proposal_id == parent_as(:proposal).id and v.user_id == ^user_id,
+      select: 1
+  end
+
+  defp scope_mine(query, id, "voted"),
+    do: from(p in query, where: exists(voted_by(id)))
+
+  defp scope_mine(query, id, "all"),
+    do: from(p in query, where: p.user_id == ^id or exists(voted_by(id)))
+
+  defp scope_mine(query, id, _created),
+    do: from(p in query, where: p.user_id == ^id)
+
+  defp filter_status(query, status) when status in ~w(open passed rejected),
+    do: from(p in query, where: p.status == ^status)
+
+  defp filter_status(query, _), do: query
+
+  defp filter_author(query, user_id) do
+    if is_binary(user_id) and Rice.Tsid.valid?(user_id),
+      do: from(p in query, where: p.user_id == ^user_id),
+      else: query
+  end
+
+  @doc """
+  当前用户在这批提案上的投票,`%{proposal_id => choice}`。未登录返回空 map。
+
+  一次查询解决列表的「我投过没」,不做 N+1。
+  """
+  def my_votes(nil, _proposals), do: %{}
+
+  def my_votes(%User{id: uid}, proposals) do
+    ids = Enum.map(proposals, & &1.id)
+
+    from(v in Vote,
+      where: v.user_id == ^uid and v.proposal_id in ^ids,
+      select: {v.proposal_id, v.choice}
+    )
+    |> Repo.all()
+    |> Map.new()
+  end
+
+  def fetch_proposal(id) do
+    if Rice.Tsid.valid?(id) do
+      case Repo.one(from p in base(), where: p.id == ^id) do
+        nil -> {:error, :not_found}
+        proposal -> {:ok, proposal}
+      end
+    else
+      {:error, :not_found}
+    end
+  end
+
+  def create_proposal(%User{} = user, attrs) do
+    %Proposal{user_id: user.id}
+    |> Proposal.create_changeset(attrs)
+    |> Repo.insert()
+    |> case do
+      {:ok, proposal} -> {:ok, Repo.preload(proposal, [:attachment, user: :avatar])}
+      error -> error
+    end
+  end
+
+  @doc "删自己的提案(软删)。别人的返回 :forbidden 而不是假装成功。"
+  def delete_proposal(%User{id: user_id}, %Proposal{} = proposal) do
+    if proposal.user_id == user_id do
+      proposal
+      |> Ecto.Changeset.change(deleted_at: DateTime.utc_now())
+      |> Repo.update()
+    else
+      {:error, :forbidden}
+    end
+  end
+
+  # ── 投票 ────────────────────────────────────────────────────────────────
+
+  @doc """
+  投票。一人一票,由 `(proposal_id, user_id)` 唯一索引保证 ——
+  并发重复投票会被数据库挡下,而不是靠先查后插。
+  """
+  def vote(%User{} = user, %Proposal{} = proposal, choice) do
+    cond do
+      not Proposal.open?(proposal) ->
+        {:error, :proposal_closed}
+
+      DateTime.compare(proposal.closes_at, DateTime.utc_now()) != :gt ->
+        {:error, :proposal_closed}
+
+      choice not in Vote.choices() ->
+        {:error, :invalid_choice}
+
+      true ->
+        changeset =
+          Vote.changeset(%Vote{}, %{
+            proposal_id: proposal.id,
+            user_id: user.id,
+            choice: choice
+          })
+
+        Multi.new()
+        |> Multi.insert(:vote, changeset)
+        |> Multi.run(:count, fn repo, _ -> bump_count(repo, proposal.id, choice) end)
+        |> Repo.transaction()
+        |> case do
+          {:ok, %{vote: vote}} -> {:ok, vote}
+          {:error, _step, %Ecto.Changeset{} = cs, _} -> {:error, cs}
+          {:error, _step, reason, _} -> {:error, reason}
+        end
+    end
+  end
+
+  # 原子自增,不读-改-写 —— 并发投票时不会互相覆盖计数
+  defp bump_count(repo, proposal_id, "agree") do
+    {1, _} =
+      repo.update_all(from(p in Proposal, where: p.id == ^proposal_id), inc: [agree_count: 1])
+
+    {:ok, :agree}
+  end
+
+  defp bump_count(repo, proposal_id, "oppose") do
+    {1, _} =
+      repo.update_all(from(p in Proposal, where: p.id == ^proposal_id), inc: [oppose_count: 1])
+
+    {:ok, :oppose}
+  end
+
+  def get_my_vote(%User{id: user_id}, %Proposal{id: proposal_id}) do
+    Repo.one(from v in Vote, where: v.proposal_id == ^proposal_id and v.user_id == ^user_id)
+  end
+
+  # ── 评论 ────────────────────────────────────────────────────────────────
+
+  def list_comments(%Proposal{id: proposal_id}, params \\ %{}) do
+    from(c in Comment,
+      where: c.proposal_id == ^proposal_id and is_nil(c.deleted_at),
+      preload: [user: :avatar]
+    )
+    |> Pagination.paginate(Repo, Pagination.params(params))
+  end
+
+  def create_comment(%User{} = user, %Proposal{} = proposal, body) do
+    %Comment{}
+    |> Comment.changeset(%{proposal_id: proposal.id, user_id: user.id, body: body})
+    |> Repo.insert()
+    |> case do
+      {:ok, comment} -> {:ok, Repo.preload(comment, user: :avatar)}
+      error -> error
+    end
+  end
+
+  def fetch_comment(%Proposal{id: proposal_id}, id) do
+    if Rice.Tsid.valid?(id) do
+      case Repo.one(
+             from c in Comment,
+               where: c.id == ^id and c.proposal_id == ^proposal_id and is_nil(c.deleted_at)
+           ) do
+        nil -> {:error, :not_found}
+        comment -> {:ok, comment}
+      end
+    else
+      {:error, :not_found}
+    end
+  end
+
+  def delete_comment(%User{id: user_id}, %Comment{} = comment) do
+    if comment.user_id == user_id do
+      comment |> Ecto.Changeset.change(deleted_at: DateTime.utc_now()) |> Repo.update()
+    else
+      {:error, :forbidden}
+    end
+  end
+
+  # ── 结票 ────────────────────────────────────────────────────────────────
+
+  @doc """
+  把所有已过截止时间、仍是 open 的提案结掉。由 Oban 的 cron 每分钟调用。
+
+  返回 `%{passed: n, rejected: n}`。幂等 —— 已结的提案不会被再处理一次。
+  """
+  def close_due_proposals(now \\ DateTime.utc_now()) do
+    threshold = Rice.Settings.get_site().proposal_approval_votes
+
+    due =
+      Repo.all(
+        from p in Proposal,
+          where: p.status == "open" and is_nil(p.deleted_at) and p.closes_at <= ^now,
+          select: {p.id, p.agree_count}
+      )
+
+    Enum.reduce(due, %{passed: 0, rejected: 0}, fn {id, agree}, acc ->
+      status = if agree >= threshold, do: "passed", else: "rejected"
+
+      # where status = 'open' 让并发/重跑不会重复计数
+      {count, _} =
+        Repo.update_all(
+          from(p in Proposal, where: p.id == ^id and p.status == "open"),
+          set: [status: status, updated_at: DateTime.utc_now()]
+        )
+
+      if count == 1, do: Map.update!(acc, String.to_existing_atom(status), &(&1 + 1)), else: acc
+    end)
+  end
+end

@@ -28,6 +28,7 @@ defmodule RiceWeb.ConnCase do
       import Plug.Conn
       import Phoenix.ConnTest
       import RiceWeb.ConnCase
+      import Rice.Fixtures
     end
   end
 

@@ -54,7 +54,9 @@ defmodule Rice.Bridge do
             :ok
 
           {:error, reason} ->
-            Logger.warning("bridge: profile bootstrap failed for #{identity.did}: #{inspect(reason)}")
+            Logger.warning(
+              "bridge: profile bootstrap failed for #{identity.did}: #{inspect(reason)}"
+            )
         end
 
       {:ok, _record} ->
@@ -106,13 +108,22 @@ defmodule Rice.Bridge do
   defp create_account(base, sub, password) do
     domain = PDS.handle_domain()
 
-    case PDS.create_account(%{email: email(base), handle: base <> "." <> domain, password: password}) do
+    case PDS.create_account(%{
+           email: email(base),
+           handle: base <> "." <> domain,
+           password: password
+         }) do
       {:ok, session} ->
         {:ok, session}
 
       {:error, {:pds, _method, _status, _msg}} ->
         base2 = base <> "-" <> String.slice(sanitize(sub), 0, 6)
-        PDS.create_account(%{email: email(base2), handle: base2 <> "." <> domain, password: password})
+
+        PDS.create_account(%{
+          email: email(base2),
+          handle: base2 <> "." <> domain,
+          password: password
+        })
 
       {:error, reason} ->
         {:error, reason}

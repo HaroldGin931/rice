@@ -1,0 +1,94 @@
+defmodule Rice.Accounts.User do
+  @moduledoc """
+  用户档案(原 t_user)。
+
+  **rice 不存密码。** 密码权威是 PDS —— 登录就是拿 handle + 密码打
+  `com.atproto.server.createSession`。这一点从 core 原样保留。
+  """
+  use Rice.Schema
+
+  schema "users" do
+    field :legacy_id, :string
+    field :did, :string
+    field :handle, :string
+    field :email, :string
+    field :phone, :string
+    field :phone_region, :string, default: "86"
+    field :nickname, :string, default: ""
+    field :bio, :string, default: ""
+    field :grain_balance, :integer, default: 0
+    field :node_member, :boolean, default: false
+    field :disabled_at, :utc_datetime_usec
+    field :deleted_at, :utc_datetime_usec
+
+    belongs_to :avatar, Rice.Files.Attachment
+
+    timestamps()
+  end
+
+  @doc "注册时建档。did/handle 来自 PDS,不可由客户端指定。"
+  def registration_changeset(user, attrs) do
+    user
+    |> cast(attrs, [:did, :handle, :email, :phone, :phone_region, :nickname, :legacy_id])
+    |> validate_required([:did, :handle])
+    |> validate_length(:handle, max: 256)
+    |> validate_length(:did, max: 128)
+    |> normalize_contacts()
+    |> validate_contacts()
+    |> unique_constraints()
+  end
+
+  @doc "用户自己能改的字段。did / handle / 余额 / 禁用状态都不在其中。"
+  def profile_changeset(user, attrs) do
+    user
+    |> cast(attrs, [:nickname, :bio, :avatar_id])
+    |> validate_length(:nickname, max: 64)
+    |> validate_length(:bio, max: 512)
+    |> foreign_key_constraint(:avatar_id)
+  end
+
+  @doc "改绑手机 / 邮箱。"
+  def contact_changeset(user, attrs) do
+    user
+    |> cast(attrs, [:email, :phone, :phone_region])
+    |> normalize_contacts()
+    |> validate_contacts()
+    |> unique_constraints()
+  end
+
+  # 空串一律存成 NULL —— core 用 '' 表示"没有",导致唯一索引根本没法建
+  defp normalize_contacts(changeset) do
+    changeset
+    |> update_change(:email, &blank_to_nil/1)
+    |> update_change(:phone, &blank_to_nil/1)
+    |> update_change(:email, fn v -> v && String.downcase(v) end)
+  end
+
+  defp blank_to_nil(nil), do: nil
+
+  defp blank_to_nil(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp validate_contacts(changeset) do
+    changeset
+    |> validate_format(:email, ~r/^[^@\s]+@[^@\s]+\.[^@\s]+$/, message: "邮箱格式不合法")
+    |> validate_format(:phone, ~r/^\d{5,20}$/, message: "手机号不合法")
+    |> validate_length(:phone_region, max: 8)
+  end
+
+  defp unique_constraints(changeset) do
+    changeset
+    |> unique_constraint(:did, name: :users_did_idx)
+    |> unique_constraint(:handle, name: :users_handle_idx)
+    |> unique_constraint(:email, name: :users_email_idx, message: "该邮箱已被使用")
+    |> unique_constraint(:phone, name: :users_phone_idx, message: "该手机号已被使用")
+    |> unique_constraint(:legacy_id)
+  end
+
+  def active?(%__MODULE__{disabled_at: nil, deleted_at: nil}), do: true
+  def active?(%__MODULE__{}), do: false
+end

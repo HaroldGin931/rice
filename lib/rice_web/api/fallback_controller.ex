@@ -1,0 +1,60 @@
+defmodule RiceWeb.Api.FallbackController do
+  @moduledoc """
+  控制器返回非 `%Plug.Conn{}` 时的兜底。
+
+  core 的做法是 HTTP 永远 200,靠信封里的 `{code, message}` 表达失败。这里回到
+  HTTP 状态码本身,body 统一是 `{"errors": ...}`。
+  """
+  use Phoenix.Controller, formats: [:json]
+
+  import Plug.Conn, only: [put_status: 2]
+
+  alias RiceWeb.Api.ErrorJSON
+
+  def call(conn, {:error, :not_found}) do
+    conn
+    |> put_status(:not_found)
+    |> put_view(json: ErrorJSON)
+    |> render(:"404")
+  end
+
+  def call(conn, {:error, :unauthorized}) do
+    conn
+    |> put_status(:unauthorized)
+    |> put_view(json: ErrorJSON)
+    |> render(:"401")
+  end
+
+  def call(conn, {:error, :forbidden}) do
+    conn
+    |> put_status(:forbidden)
+    |> put_view(json: ErrorJSON)
+    |> render(:"403")
+  end
+
+  def call(conn, {:error, reason})
+      when reason in [
+             :invalid_ticket,
+             :missing_handle,
+             :weak_password,
+             :invalid_amount,
+             :unprocessable_entity
+           ] do
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{errors: %{detail: detail(reason)}})
+  end
+
+  def call(conn, {:error, %Ecto.Changeset{} = changeset}) do
+    conn
+    |> put_status(:unprocessable_entity)
+    |> put_view(json: ErrorJSON)
+    |> render(:changeset, changeset: changeset)
+  end
+
+  defp detail(:invalid_ticket), do: "注册票据无效或已过期,请重新验证"
+  defp detail(:missing_handle), do: "缺少 handle"
+  defp detail(:weak_password), do: "密码至少 8 位"
+  defp detail(:invalid_amount), do: "金额必须是正整数"
+  defp detail(:unprocessable_entity), do: "请求无法处理"
+end
