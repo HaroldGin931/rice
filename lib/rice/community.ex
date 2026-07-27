@@ -64,6 +64,71 @@ defmodule Rice.Community do
     |> Enum.map(&{&1, Map.get(awarded, &1.id)})
   end
 
+  @doc """
+  后台的勋章列表,带持有人数。
+
+  持有人数是一条 `left_join + count` 现算的 —— core 缓存在 `t_medal.quantity`,
+  那是一份会和实际发放对不上的副本。
+  """
+  def list_all_badges(params \\ %{}) do
+    from(b in Badge,
+      left_join: a in assoc(b, :awards),
+      group_by: b.id,
+      select: %{b | holder_count: count(a.id)},
+      preload: [:image]
+    )
+    |> Pagination.paginate(Repo, Pagination.params(params))
+  end
+
+  def fetch_badge(id) do
+    if Rice.Tsid.valid?(id) do
+      case Repo.one(from b in Badge, where: b.id == ^id, preload: [:image]) do
+        nil -> {:error, :not_found}
+        badge -> {:ok, badge}
+      end
+    else
+      {:error, :not_found}
+    end
+  end
+
+  def create_badge(attrs) do
+    %Badge{}
+    |> Badge.changeset(Map.new(attrs, fn {k, v} -> {to_string(k), v} end))
+    |> Repo.insert()
+    |> case do
+      {:ok, badge} -> {:ok, Repo.preload(badge, :image)}
+      other -> other
+    end
+  end
+
+  @doc "持有某枚勋章的人。"
+  def list_badge_holders(%Badge{id: id}, params \\ %{}) do
+    from(a in BadgeAward,
+      where: a.badge_id == ^id,
+      preload: [user: :avatar]
+    )
+    |> filter_holder(params["q"])
+    |> Pagination.paginate(Repo, Pagination.params(params))
+  end
+
+  defp filter_holder(query, q) when is_binary(q) and q != "" do
+    pattern =
+      "%" <>
+        (q
+         |> String.trim()
+         |> String.replace("\\", "\\\\")
+         |> String.replace("%", "\\%")
+         |> String.replace("_", "\\_")) <> "%"
+
+    from a in query,
+      join: u in assoc(a, :user),
+      where:
+        ilike(u.nickname, ^pattern) or ilike(u.email, ^pattern) or ilike(u.phone, ^pattern) or
+          ilike(u.handle, ^pattern)
+  end
+
+  defp filter_holder(query, _), do: query
+
   @doc "发一枚勋章。同一枚勋章不会重复发给同一个人。"
   def award_badge(%Badge{} = badge, user) do
     %BadgeAward{}

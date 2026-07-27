@@ -6,6 +6,9 @@ defmodule Rice.Community.Badge do
     field :legacy_id, :string
     field :name, :string
 
+    # 现算的持有人数,只有后台列表会填 —— core 把它缓存成 t_medal.quantity
+    field :holder_count, :integer, virtual: true
+
     belongs_to :image, Rice.Files.Attachment
     has_many :awards, Rice.Community.BadgeAward
 

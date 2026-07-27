@@ -2,6 +2,7 @@ defmodule RiceWeb.Router do
   use RiceWeb, :router
 
   import RiceWeb.Api.Auth
+  import RiceWeb.Api.Admin.Auth
 
   pipeline :browser do
     plug :accepts, ["html"]
@@ -19,6 +20,21 @@ defmodule RiceWeb.Router do
 
   pipeline :api_authenticated do
     plug :require_authenticated_user
+  end
+
+  # 管理端。令牌和 C 端完全分开 —— 两套 token 互相换不过去。
+  pipeline :admin_api do
+    plug :accepts, ["json"]
+    plug :fetch_current_admin
+  end
+
+  pipeline :admin_authenticated do
+    plug :require_admin
+  end
+
+  # role=admin 才能进。core 只在前端隐藏菜单,接口本身不查。
+  pipeline :admin_only do
+    plug :require_admin_role
   end
 
   scope "/", RiceWeb do
@@ -75,6 +91,98 @@ defmodule RiceWeb.Router do
     get "/proposals", ProposalController, :index
     get "/proposals/:id", ProposalController, :show
     get "/proposals/:proposal_id/comments", ProposalCommentController, :index
+  end
+
+  # ── 管理端 ────────────────────────────────────────────────────────────
+  # core 的 /api/v1/admin/* 是 56 个动词式 POST;这里换成 REST。
+  # 映射表见 docs/backend-migration-plan.md §5.2。
+
+  # 匿名可达的只有登录和找回密码
+  scope "/api/admin", RiceWeb.Api.Admin do
+    pipe_through :admin_api
+
+    post "/session/challenge", SessionController, :challenge
+    post "/session", SessionController, :create
+    post "/passwords/challenge", PasswordController, :challenge
+    post "/passwords", PasswordController, :create
+  end
+
+  # 登录即可(管理员和运营都能用)
+  scope "/api/admin", RiceWeb.Api.Admin do
+    pipe_through [:admin_api, :admin_authenticated]
+
+    delete "/session", SessionController, :delete
+    get "/me", AdminUserController, :me
+    patch "/me", AdminUserController, :update_me
+  end
+
+  # 仅 role=admin
+  scope "/api/admin", RiceWeb.Api.Admin do
+    pipe_through [:admin_api, :admin_authenticated, :admin_only]
+
+    get "/admin_users", AdminUserController, :index
+    post "/admin_users", AdminUserController, :create
+    delete "/admin_users/:id", AdminUserController, :delete
+  end
+
+  # 运营内容:四种资源同构,共用 CatalogController,资源类型走 assigns 传 ——
+  # 不从 URL 参数推,免得把用户输入喂给 String.to_existing_atom/1。
+  scope "/api/admin", RiceWeb.Api.Admin do
+    pipe_through [:admin_api, :admin_authenticated]
+
+    for {path, kind, view} <- [
+          {"apps", :apps, RiceWeb.Api.Admin.AppJSON},
+          {"banners", :banners, RiceWeb.Api.Admin.BannerJSON},
+          {"announcements", :announcements, RiceWeb.Api.Admin.AnnouncementJSON},
+          {"nodes", :nodes, RiceWeb.Api.Admin.NodeJSON}
+        ] do
+      assigns = %{kind: kind, json_view: view}
+
+      get "/#{path}", CatalogController, :index, assigns: assigns
+      post "/#{path}", CatalogController, :create, assigns: assigns
+      # 排序要排在 /:id 前面,否则 "positions" 会被当成一个 id
+      put "/#{path}/positions", CatalogController, :reorder, assigns: assigns
+      get "/#{path}/:id", CatalogController, :show, assigns: assigns
+      patch "/#{path}/:id", CatalogController, :update, assigns: assigns
+      delete "/#{path}/:id", CatalogController, :delete, assigns: assigns
+    end
+  end
+
+  # 用户、稻米、提案、勋章、全站配置
+  scope "/api/admin", RiceWeb.Api.Admin do
+    pipe_through [:admin_api, :admin_authenticated]
+
+    # core 的 9 个用户接口在这里是 3 个:一个带过滤的列表、一个详情、
+    # 一个改管理位的 PATCH(disabled / node_member)
+    get "/users", UserController, :index
+    get "/users/:id", UserController, :show
+    patch "/users/:id", UserController, :update
+    get "/users/:user_id/grain_transfers", GrainController, :transfers
+
+    # single / batch 合成一个 —— 收款人永远是数组
+    get "/grain_grants", GrainController, :index
+    post "/grain_grants", GrainController, :create
+
+    get "/proposals", ProposalController, :index
+    get "/proposals/:id", ProposalController, :show
+    patch "/proposals/:id", ProposalController, :update
+    delete "/proposals/:proposal_id/comments/:id", ProposalController, :delete_comment
+
+    get "/badges", BadgeController, :index
+    post "/badges", BadgeController, :create
+    get "/badges/:badge_id/holders", BadgeController, :holders
+
+    # core 的 detail + modify-foundation-info + modify-proposal-config
+    get "/settings", SettingsController, :show
+    patch "/settings", SettingsController, :update
+
+    # 批量操作的 Excel 模板
+    get "/templates", TemplateController, :index
+
+    # 贴文不在 rice 库里,这里只是把下架请求转给 post 服务 ——
+    # uri 放 body 不放路径:AT URI 里有斜杠。
+    post "/post_takedowns", PostController, :create
+    delete "/post_takedowns", PostController, :delete
   end
 
   # 需要登录的接口

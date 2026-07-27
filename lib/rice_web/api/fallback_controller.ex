@@ -38,6 +38,9 @@ defmodule RiceWeb.Api.FallbackController do
              :missing_handle,
              :weak_password,
              :invalid_amount,
+             :invalid_listed,
+             :cannot_delete_superuser,
+             :cannot_delete_self,
              :unprocessable_entity
            ] do
     conn
@@ -56,5 +59,8 @@ defmodule RiceWeb.Api.FallbackController do
   defp detail(:missing_handle), do: "缺少 handle"
   defp detail(:weak_password), do: "密码至少 8 位"
   defp detail(:invalid_amount), do: "金额必须是正整数"
+  defp detail(:invalid_listed), do: "listed 必须是 true 或 false"
+  defp detail(:cannot_delete_superuser), do: "超级管理员不能删除"
+  defp detail(:cannot_delete_self), do: "不能删除自己"
   defp detail(:unprocessable_entity), do: "请求无法处理"
 end

@@ -221,6 +221,72 @@ defmodule Rice.Governance do
     end
   end
 
+  # ── 后台 ────────────────────────────────────────────────────────────────
+
+  @doc """
+  后台的提案列表。和 C 端那份的区别:**看得到已下架和已软删的**。
+  下架之后后台自己也找不回来的话,就没法复核了。
+  """
+  def list_all_proposals(params \\ %{}) do
+    from(p in Proposal, as: :proposal, preload: [:attachment, user: :avatar])
+    |> filter_status(params["status"])
+    |> filter_listed(params["listed"])
+    |> filter_title(params["q"])
+    |> Pagination.paginate(Repo, Pagination.params(params))
+  end
+
+  defp filter_listed(query, "true"), do: from(p in query, where: p.listed == true)
+  defp filter_listed(query, "false"), do: from(p in query, where: p.listed == false)
+  defp filter_listed(query, _), do: query
+
+  defp filter_title(query, q) when is_binary(q) and q != "" do
+    pattern =
+      "%" <>
+        (q
+         |> String.trim()
+         |> String.replace("\\", "\\\\")
+         |> String.replace("%", "\\%")
+         |> String.replace("_", "\\_")) <> "%"
+
+    from p in query,
+      left_join: u in assoc(p, :user),
+      where: ilike(p.title, ^pattern) or ilike(u.nickname, ^pattern)
+  end
+
+  defp filter_title(query, _), do: query
+
+  @doc "后台取单条 —— 下架的也取得到。"
+  def fetch_any_proposal(id) do
+    if Rice.Tsid.valid?(id) do
+      case Repo.one(from p in Proposal, where: p.id == ^id, preload: [:attachment, user: :avatar]) do
+        nil -> {:error, :not_found}
+        proposal -> {:ok, proposal}
+      end
+    else
+      {:error, :not_found}
+    end
+  end
+
+  @doc "下架 / 恢复。core 的 take-off 只能单向下架,没有恢复的入口。"
+  def set_listed(%Proposal{} = proposal, listed) when is_boolean(listed) do
+    proposal
+    |> Ecto.Changeset.change(listed: listed)
+    |> Repo.update()
+    |> case do
+      {:ok, proposal} -> {:ok, Repo.preload(proposal, [:attachment, user: :avatar])}
+      other -> other
+    end
+  end
+
+  def set_listed(_proposal, _), do: {:error, :invalid_listed}
+
+  @doc "后台删任意评论。C 端只能删自己的。"
+  def admin_delete_comment(%Proposal{} = proposal, comment_id) do
+    with {:ok, comment} <- fetch_comment(proposal, comment_id) do
+      comment |> Ecto.Changeset.change(deleted_at: DateTime.utc_now()) |> Repo.update()
+    end
+  end
+
   # ── 结票 ────────────────────────────────────────────────────────────────
 
   @doc """

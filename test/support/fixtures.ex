@@ -66,6 +66,31 @@ defmodule Rice.Fixtures do
     |> Repo.insert!()
   end
 
+  @doc "返回管理员。默认 role=admin,密码 `admin-password`。"
+  def admin_fixture(attrs \\ %{}) do
+    n = System.unique_integer([:positive])
+
+    attrs =
+      Enum.into(attrs, %{
+        phone: "138#{String.pad_leading(to_string(rem(n, 100_000_000)), 8, "0")}",
+        phone_region: "86",
+        nickname: "管理员#{n}",
+        role: "admin",
+        password: "admin-password"
+      })
+
+    %Rice.Admin.AdminUser{}
+    |> Rice.Admin.AdminUser.changeset(attrs)
+    |> Repo.insert!()
+  end
+
+  @doc "返回 {管理员, 明文令牌}。"
+  def admin_with_token(attrs \\ %{}) do
+    admin = admin_fixture(attrs)
+    {:ok, token} = Rice.Admin.issue_token(admin)
+    {admin, token}
+  end
+
   def attachment_fixture(attrs \\ %{}) do
     attrs =
       Enum.into(attrs, %{

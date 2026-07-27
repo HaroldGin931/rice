@@ -10,7 +10,11 @@ defmodule RiceWeb.Api.GrainTransferJSON do
 
   def show(%{transfer: transfer} = assigns), do: %{data: data(transfer, assigns[:viewer])}
 
-  defp data(transfer, viewer) do
+  @doc """
+  单笔转账。`viewer` 决定 direction —— 后台看别人的明细时传的是那个人,
+  不是当前登录的管理员。
+  """
+  def data(transfer, viewer) do
     %{
       id: transfer.id,
       kind: transfer.kind,

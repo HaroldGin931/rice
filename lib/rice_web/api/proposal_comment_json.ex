@@ -7,7 +7,7 @@ defmodule RiceWeb.Api.ProposalCommentJSON do
 
   def show(%{comment: comment}), do: %{data: data(comment)}
 
-  defp data(comment) do
+  def data(comment) do
     %{
       id: comment.id,
       body: comment.body,

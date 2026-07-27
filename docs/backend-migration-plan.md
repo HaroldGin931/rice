@@ -1,8 +1,8 @@
 # 把 xiangjiandao-core 的后端能力迁移到 rice —— 调研与方案
 
-> 状态:**C 端后端(36 个接口)与前端调用点全部完成**(期 0–5 + 前端全量迁移,
-> 进度见 §9),剩管理端 60 个。rice 325 个测试全绿;social-app 分支 `rice-backend`
-> 相对 master 零新增类型错误。
+> 状态:**C 端(36 个接口)与管理端(56 个接口)的后端全部完成**,social-app 的
+> 调用点也已全部切到 rice(进度见 §9)。rice 411 个测试全绿;social-app 分支
+> `rice-backend` 相对 master 零新增类型错误。剩 `social-app-admin` 前端未切。
 > 全部在本地库开发验证,**生产环境未接触,未做任何数据迁移**。
 > 全部在本地库开发验证,**生产环境未接触,未做任何数据迁移**。
 > 目标:用 Phoenix(rice)替换 .NET 的 `xiangjiandao-core`,顺便把跟着 DDD/EF 脚手架长出来的
@@ -1094,6 +1094,69 @@ rice 侧的头像只用于它自己那几个页面(节点成员、评论、转�
 已把 `tail -40` 去掉。现在的真实数字:**master 313,分支 294,新增为空**
 (逐行 diff,不是比总数)。分支比 master 少 19 个,是因为迁移顺手消掉了
 core 那些 VO 类型带来的老错误。
+
+### 管理端(2026-07-28,rice 分支 `backend-migration`)
+
+**core 的 56 个 `/api/v1/admin/*` 接口 → rice 的 52 条 REST 路由。411 个测试全绿。**
+逐条核对过映射:56 条全部落到真实存在的路由上(脚本比对 `mix phx.routes` 的输出)。
+
+接口数变少不是漏了,是几处 RPC 本来就是同一件事的不同参数:
+
+| core | rice | 为什么能合 |
+|---|---|---|
+| `user/page`、`node-user/page`、`user/search`、`user/search-by-name`、`unbound-node-user-search` | `GET /api/admin/users?q=&node_member=` | 五个都是同一个列表的不同过滤 |
+| `user/enable`、`user/disable`、`set-node-user`、`cancel-node-user` | `PATCH /api/admin/users/:id` | 同一行上的两个布尔位 |
+| `score-distribution/single`、`score-distribution/batch` | `POST /api/admin/grain_grants` | 收款人永远是数组,发一个人就是长度 1 |
+| `global-config/detail`、`modify-foundation-info`、`modify-proposal-config` | `GET`/`PATCH /api/admin/settings` | 改的是同一行 |
+| app/banner/information/node 各自的 list/detail/create/modify/delete/sort | 四组 REST 路由指向同一个 `CatalogController` | 四种资源的后台操作完全同构 |
+
+#### 顺手补上的几个洞
+
+**① 不知道密码也能让管理员的手机响。** core 的登录是三步:`login-with-password`
+只回一个 bool,验证码要前端自己去调**公开的** `/sms/send`,再
+`login-with-verification-code` 换令牌。也就是说发码这一步根本不校验密码。
+rice 合成两步:`POST /session/challenge` 密码对了**才**发码。
+
+**② 管理端接口没有权限校验。** core 的角色控制只在前端 ——
+`_app.tsx` 里 `hideInMenu: !adminAuth` 把「投放管理」和「管理员管理」藏起来,
+接口本身不查。运营人员知道路径就能调。rice 在路由上加了 `:admin_only` 管线,
+服务端强制 `role=admin`(有测试:operator 调 `/admin_users` 是 403,
+但内容运营照常 201)。
+
+**③ 禁用一个用户要等 30 天才生效。** core 只把标记写进库,用户手上的 daoJwt
+还能用满有效期。rice 的 `PATCH /users/:id {disabled:true}` 在同一个事务里
+撤销该用户的全部令牌 —— 有测试断言禁用前 200、禁用后 401。
+
+**④ 下架之后就找不回来了。** core 的 `proposal/take-off` 是单向的,
+而管理端列表和 C 端用的是同一个「只看上架」的查询,下架的提案后台自己也看不见,
+没法复核。rice 的后台列表看得到下架的,`PATCH` 也能把 `listed` 改回 true。
+
+**⑤ 管理端和 C 端的令牌是两套。** 单独一张 `admin_tokens` 表,不是在
+`api_tokens` 上加一个 context 列 —— 后者写错一个 where 就是把管理员权限
+发给普通用户。有两条测试对着换:C 端令牌调 `/api/admin/me` 是 401,
+管理端令牌调 `/api/users/me` 也是 401。
+
+**⑥ 搜索框里的 `%` 是通配符。** 后台按昵称/手机/邮箱模糊搜,用户输入直接进
+`ILIKE`。一个 `%` 就是整表。rice 转义 `%`、`_`、`\`,有测试。
+
+**⑦ 密码摘要照抄,盐不照抄。** PBKDF2-HMAC-SHA256、27500 轮、64 字节、Base64,
+和 core 的 `PasswordHashGenerator` 逐字节兼容 —— 迁数据时不必强制所有管理员改密码。
+唯一不照抄的是盐:core 用 `Random.Shared`,那不是密码学安全的随机源,
+rice 用 `:crypto.strong_rand_bytes/1`。老密码照样验得过,验证不关心盐当初怎么来的。
+比对摘要用 `:crypto.hash_equals/2` 定长比较,账号不存在时也走一遍同样耗时的运算。
+
+#### 不迁的两条
+
+- `POST /post/api/posts/list` —— 管理端本来就是直连 post 服务,不经过 core。
+- `POST /admin/post/take-off-post` —— 贴文不在 rice 库里,rice 只做一层薄代理
+  (`POST /api/admin/post_takedowns`),意义在于 post 服务的管理凭据不必下发到前端。
+  顺带补了个恢复的入口(`DELETE`),core 只能单向下架。
+
+#### 还没做
+
+- `social-app-admin` 前端还没切过来(这一轮只做了 rice 侧)。切的时候要注意:
+  core 的管理端把**裸令牌**直接塞进 `Authorization` 头,rice 只认 `Bearer <token>`。
+- 管理员账号的数据迁移(`mix rice.import` 还没加 `admin_users` 这张表)。
 
 ### 期 0–5 剩余
 
