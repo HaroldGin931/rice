@@ -10,6 +10,16 @@ config :rice, Rice.Repo,
   show_sensitive_data_on_connection_error: true,
   pool_size: 10
 
+# 本地跑的前端:social-app 的 Expo web(8081)和管理端的 vite(5173)。
+# 管理端其实是走 vite 代理的同源请求,列在这里是为了直连时也能用。
+config :rice, :cors,
+  origins: [
+    "http://localhost:8081",
+    "http://127.0.0.1:8081",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173"
+  ]
+
 # For development, we disable any cache and enable
 # debugging and code reloading.
 #

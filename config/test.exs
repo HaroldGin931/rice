@@ -50,3 +50,6 @@ config :phoenix_live_view,
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# 测试里用一个固定的来源,断言才有东西可对
+config :rice, :cors, origins: ["http://localhost:8081"]

@@ -51,5 +51,24 @@ defmodule RiceWeb.Endpoint do
   plug Plug.MethodOverride
   plug Plug.Head
   plug Plug.Session, @session_options
+
+  # 只给 /api 加 CORS。
+  #
+  # C 端 app 和 rice 不同源:app 在 xjdao.xyz,rice 在 rice.xjdao.xyz ——
+  # 没有这些头,浏览器会把每一个 rice 请求都拦下来(原生 app 不受影响,
+  # 所以这个洞在真机上看不出来,只在 web 版上炸)。
+  #
+  # 范围限定在 /api 是必要的,不是洁癖:`/session/:ticket` 那个交接接口
+  # 自己写了一套 CORS 头,两边都写就会出现重复的 `Access-Control-Allow-Origin`,
+  # 浏览器直接判定不合法。
+  plug :cors_for_api
   plug RiceWeb.Router
+
+  @cors_opts CORSPlug.init([])
+
+  defp cors_for_api(%{request_path: "/api" <> _} = conn, _opts) do
+    CORSPlug.call(conn, Keyword.put(@cors_opts, :origin, Rice.Cors.allowed_origins()))
+  end
+
+  defp cors_for_api(conn, _opts), do: conn
 end

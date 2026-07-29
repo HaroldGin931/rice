@@ -55,6 +55,14 @@ config :rice, :pds,
 # Session handoff to the front-end (social-app). After the bridge mints a PDS
 # session, rice redirects the browser here with a one-time ticket the app
 # redeems cross-origin; `allowed_origin` scopes the redeem endpoint's CORS.
+# 允许跨域调 /api 的来源,逗号分隔。C 端 app 和 rice 不同源,web 版靠这个。
+#
+# 只在环境变量真的设了的时候才覆盖 —— runtime.exs 在 dev.exs / test.exs
+# **之后**执行,无条件写的话会把那两个环境配好的本地来源清空。
+if origins = System.get_env("CORS_ORIGINS") do
+  config :rice, :cors, origins: Rice.Cors.parse(origins)
+end
+
 config :rice, :handoff,
   target_url: System.get_env("HANDOFF_URL") || "https://together.li/semi-callback",
   allowed_origin: System.get_env("HANDOFF_ALLOWED_ORIGIN") || "https://together.li"
