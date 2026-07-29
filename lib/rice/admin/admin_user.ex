@@ -11,6 +11,12 @@ defmodule Rice.Admin.AdminUser do
   只有一处刻意不照抄:core 用 `Random.Shared` 生成盐,那不是密码学安全的
   随机源。这里用 `:crypto.strong_rand_bytes/1`。老密码照样验得过 ——
   验证不关心盐当初是怎么生成的。
+
+  ## 手机号是必填的
+
+  登录和找回密码都只认手机号(`Rice.Admin.start_login/3`、`reset_password/4`)。
+  邮箱只是联系方式,没有对应的登录入口。所以这里不能只填邮箱 ——
+  那样建出来的账号能存进库,却既登不进去也找不回密码。
   """
   use Rice.Schema
 
@@ -48,7 +54,7 @@ defmodule Rice.Admin.AdminUser do
     |> validate_length(:nickname, max: 64)
     |> validate_format(:email, ~r/^[^@\s]+@[^@\s]+\.[^@\s]+$/, message: "邮箱格式不正确")
     |> validate_format(:phone, ~r/^\d{5,20}$/, message: "手机号格式不正确")
-    |> validate_contact_present()
+    |> validate_required([:phone], message: "必须填手机号")
     |> put_password()
     |> unique_constraint(:email, name: :admin_users_email_index)
     |> unique_constraint([:phone_region, :phone], name: :admin_users_phone_index)
@@ -65,15 +71,6 @@ defmodule Rice.Admin.AdminUser do
 
   def password_changeset(admin, password) do
     admin |> change(password: password) |> put_password()
-  end
-
-  defp validate_contact_present(changeset) do
-    email = get_field(changeset, :email)
-    phone = get_field(changeset, :phone)
-
-    if is_nil(email) and is_nil(phone),
-      do: add_error(changeset, :phone, "手机号和邮箱至少要有一个"),
-      else: changeset
   end
 
   defp put_password(changeset) do

@@ -94,6 +94,45 @@ defmodule RiceWeb.Api.Admin.GrainControllerTest do
              |> json_response(422)
     end
 
+    # `to` 是 JSON 数组,里面塞什么都能过 HTTP 那一层。
+    # 直接 String.trim/1 会抛,表现是 500 —— 客户端发错格式不该是服务端的错。
+    test "收款人不是字符串时 422 而不是 500", %{conn: conn, token: token} do
+      user = user_fixture()
+
+      for bad <- [[nil], [123], [%{"phone" => "13800000000"}], [["嵌套"]], [user.did, nil]] do
+        assert %{"errors" => %{"to" => [_]}} =
+                 conn
+                 |> authed(token)
+                 |> post(~p"/api/admin/grain_grants", %{to: bad, amount: 10})
+                 |> json_response(422)
+      end
+
+      assert Rice.Repo.get!(Rice.Accounts.User, user.id).grain_balance == 0
+    end
+
+    # 从表格里粘一列手机号,末尾常带几个空行
+    test "空白的收款人直接丢掉,不算作认不出来", %{conn: conn, token: token} do
+      user = user_fixture(%{phone: "13800006666", phone_region: "86"})
+
+      assert %{"data" => %{"granted" => 1}} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/grain_grants", %{
+                 to: ["13800006666", "", "  "],
+                 amount: 15
+               })
+               |> json_response(201)
+
+      assert Rice.Repo.get!(Rice.Accounts.User, user.id).grain_balance == 15
+    end
+
+    test "全是空白就等于没有收款人", %{conn: conn, token: token} do
+      assert conn
+             |> authed(token)
+             |> post(~p"/api/admin/grain_grants", %{to: ["", "  "], amount: 10})
+             |> json_response(422)
+    end
+
     test "停用的用户收不到", %{conn: conn, token: token} do
       user = user_fixture(%{phone: "13800005555", phone_region: "86"})
       Rice.Repo.update!(Ecto.Changeset.change(user, disabled_at: DateTime.utc_now()))

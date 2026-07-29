@@ -25,6 +25,13 @@ defmodule RiceWeb.Api.Admin.GrainController do
         |> put_status(:unprocessable_entity)
         |> json(%{errors: %{to: ["这些收款人不存在: " <> Enum.join(missing, ", ")]}})
 
+      {:error, {:invalid_recipients, bad}} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{
+          errors: %{to: ["收款人必须是字符串,这些不是: " <> Enum.map_join(bad, ", ", &inspect/1)]}
+        })
+
       {:error, :no_recipients} ->
         conn
         |> put_status(:unprocessable_entity)

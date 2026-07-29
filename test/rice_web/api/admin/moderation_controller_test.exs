@@ -301,6 +301,32 @@ defmodule RiceWeb.Api.Admin.ModerationControllerTest do
              |> json_response(422)
     end
 
+    # 登录和找回密码都只认手机号,只填邮箱建出来的账号是个死账号:
+    # 能存进库,登不进去,也找不回密码。
+    test "只填邮箱建不出管理员", %{conn: conn, token: token} do
+      assert %{"errors" => errors} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/admin_users", %{email: "no-phone@example.com"})
+               |> json_response(422)
+
+      assert errors["phone"]
+      refute Rice.Repo.get_by(Rice.Admin.AdminUser, email: "no-phone@example.com")
+    end
+
+    test "邮箱仍然可以和手机号一起填", %{conn: conn, token: token} do
+      assert %{"data" => created} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/admin_users", %{
+                 phone: "13911116666",
+                 email: "both@example.com"
+               })
+               |> json_response(201)
+
+      assert created["email"] == "both@example.com"
+    end
+
     test "角色只能是 admin 或 operator", %{conn: conn, token: token} do
       assert conn
              |> authed(token)

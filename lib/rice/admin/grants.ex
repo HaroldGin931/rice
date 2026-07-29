@@ -60,12 +60,30 @@ defmodule Rice.Admin.Grants do
 
   # 一次查完再比对,不是一个个查 —— 收款人上千的时候差别很大
   defp resolve_all(recipients) do
-    recipients = recipients |> Enum.map(&String.trim/1) |> Enum.uniq()
-    found = Enum.map(recipients, &{&1, resolve(&1)})
+    with {:ok, recipients} <- normalize(recipients) do
+      found = Enum.map(recipients, &{&1, resolve(&1)})
 
-    case Enum.filter(found, fn {_, user} -> is_nil(user) end) do
-      [] -> {:ok, found |> Enum.map(&elem(&1, 1)) |> Enum.uniq_by(& &1.id)}
-      missing -> {:error, {:unknown_recipients, Enum.map(missing, &elem(&1, 0))}}
+      case Enum.filter(found, fn {_, user} -> is_nil(user) end) do
+        [] -> {:ok, found |> Enum.map(&elem(&1, 1)) |> Enum.uniq_by(& &1.id)}
+        missing -> {:error, {:unknown_recipients, Enum.map(missing, &elem(&1, 0))}}
+      end
+    end
+  end
+
+  # `to` 是 JSON 数组,里面可以是任何东西 —— null、数字、嵌套对象都进得来。
+  # 不先卡类型,`String.trim/1` 会抛,表现是一个 500 而不是 422。
+  #
+  # 空字符串直接丢掉:前端从表格里粘一列手机号,末尾常带几个空行。
+  defp normalize(recipients) do
+    case Enum.reject(recipients, &is_binary/1) do
+      [] ->
+        case recipients |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq() do
+          [] -> {:error, :no_recipients}
+          list -> {:ok, list}
+        end
+
+      bad ->
+        {:error, {:invalid_recipients, bad}}
     end
   end
 
