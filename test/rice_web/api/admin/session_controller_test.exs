@@ -1,6 +1,7 @@
 defmodule RiceWeb.Api.Admin.SessionControllerTest do
   use RiceWeb.ConnCase, async: true
 
+  import Ecto.Query
   import Mox
   setup :verify_on_exit!
 
@@ -130,6 +131,102 @@ defmodule RiceWeb.Api.Admin.SessionControllerTest do
 
       assert a.status == b.status
       assert a.resp_body == b.resp_body
+    end
+  end
+
+  # `challenge` 密码对了 202、错了 401 —— 这是一个可以无限次问的"密码对不对"。
+  # 验证码那边一直有 5 次上限,密码这边原先一次都没数。
+  describe "密码试错有上限" do
+    @max Rice.Admin.LoginAttempt.max_attempts()
+
+    defp fail_login(phone, times) do
+      for _ <- 1..times do
+        build_conn()
+        |> post(~p"/api/admin/session/challenge", %{phone: phone, password: "猜错的"})
+        |> json_response(401)
+      end
+    end
+
+    test "连错到上限之后锁住,正确的密码也换不到验证码", %{conn: conn} do
+      admin_fixture(%{phone: "13900000001", phone_region: "86", password: "admin-password"})
+      fail_login("13900000001", @max)
+
+      assert conn
+             |> post(~p"/api/admin/session/challenge", %{
+               phone: "13900000001",
+               password: "admin-password"
+             })
+             |> json_response(429)
+    end
+
+    # 只给存在的管理员计数的话,第六次还返回 401 就等于告诉对方"这个号不是管理员" ——
+    # 正好把"密码错和账号不存在返回同一个响应"这条设计抵消掉
+    test "不存在的手机号一样会被锁", %{conn: conn} do
+      fail_login("13900009999", @max)
+
+      assert conn
+             |> post(~p"/api/admin/session/challenge", %{
+               phone: "13900009999",
+               password: "再猜"
+             })
+             |> json_response(429)
+    end
+
+    test "密码对了就清零 —— 手滑几次不该攒着", %{conn: conn} do
+      admin_fixture(%{phone: "13900000001", phone_region: "86", password: "admin-password"})
+      expect(Rice.NotificationsMock, :send_sms, fn "86", "13900000001", _ -> :ok end)
+
+      fail_login("13900000001", @max - 1)
+
+      assert conn
+             |> post(~p"/api/admin/session/challenge", %{
+               phone: "13900000001",
+               password: "admin-password"
+             })
+             |> response(202)
+
+      refute Rice.Repo.get_by(Rice.Admin.LoginAttempt,
+               phone_region: "86",
+               phone: "13900000001"
+             )
+    end
+
+    test "锁定到期之后能再试", %{conn: conn} do
+      admin_fixture(%{phone: "13900000001", phone_region: "86", password: "admin-password"})
+      expect(Rice.NotificationsMock, :send_sms, fn "86", "13900000001", _ -> :ok end)
+
+      fail_login("13900000001", @max)
+
+      # 这张表没有主键(键是手机号),所以用 update_all 而不是 update!
+      Rice.Repo.update_all(
+        from(a in Rice.Admin.LoginAttempt,
+          where: a.phone_region == "86" and a.phone == "13900000001"
+        ),
+        set: [locked_until: DateTime.add(DateTime.utc_now(), -60)]
+      )
+
+      assert conn
+             |> post(~p"/api/admin/session/challenge", %{
+               phone: "13900000001",
+               password: "admin-password"
+             })
+             |> response(202)
+    end
+
+    # 一个号被锁不该连累别人
+    test "锁的是这个手机号,不是所有管理员", %{conn: conn} do
+      admin_fixture(%{phone: "13900000001", phone_region: "86", password: "admin-password"})
+      admin_fixture(%{phone: "13900003333", phone_region: "86", password: "another-password"})
+      expect(Rice.NotificationsMock, :send_sms, fn "86", "13900003333", _ -> :ok end)
+
+      fail_login("13900000001", @max)
+
+      assert conn
+             |> post(~p"/api/admin/session/challenge", %{
+               phone: "13900003333",
+               password: "another-password"
+             })
+             |> response(202)
     end
   end
 

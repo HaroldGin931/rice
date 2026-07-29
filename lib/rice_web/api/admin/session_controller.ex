@@ -19,7 +19,8 @@ defmodule RiceWeb.Api.Admin.SessionController do
            params["password"] || ""
          ) do
       {:ok, _} -> send_resp(conn, :accepted, "")
-      {:error, :too_many_requests} -> too_many(conn)
+      # 两种"太频繁":发码间隔没到,以及密码连错太多次被锁
+      {:error, reason} when reason in [:too_many_requests, :too_many_attempts] -> too_many(conn)
       # 密码错 / 账号不存在 / 账号停用 —— 一律同一个响应
       {:error, _} -> invalid(conn)
     end

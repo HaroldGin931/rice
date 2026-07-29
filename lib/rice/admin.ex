@@ -11,7 +11,7 @@ defmodule Rice.Admin do
   """
   import Ecto.Query
 
-  alias Rice.Admin.{AdminToken, AdminUser}
+  alias Rice.Admin.{AdminToken, AdminUser, LoginAttempt}
   alias Rice.{Pagination, Repo}
 
   @code_purpose "admin_login"
@@ -87,19 +87,72 @@ defmodule Rice.Admin do
 
   密码错、账号不存在、账号被停用返回的都是同一个 `:invalid_credentials` ——
   区分开就是一个"这个手机号是不是管理员"的探测器。
+
+  连错 `LoginAttempt.max_attempts/0` 次之后锁一段时间,返回 `:too_many_attempts`。
+  验证码那边一直有 5 次上限,密码这边原先一次都没数 —— 而这个接口的
+  202/401 正好是一个可以无限问的"密码对不对"。
   """
   def start_login(region, phone, password) do
-    admin = get_admin_by_phone(region, phone)
+    now = DateTime.utc_now()
+    attempt = get_login_attempt(region, phone)
 
-    if AdminUser.valid_password?(admin || %AdminUser{}, password) and enabled?(admin) do
-      Rice.Accounts.send_verification_code(
-        "sms",
-        Rice.Accounts.phone_target(region, phone),
-        @code_purpose
-      )
-    else
-      {:error, :invalid_credentials}
+    cond do
+      LoginAttempt.locked?(attempt, now) ->
+        {:error, :too_many_attempts}
+
+      true ->
+        admin = get_admin_by_phone(region, phone)
+
+        if AdminUser.valid_password?(admin || %AdminUser{}, password) and enabled?(admin) do
+          clear_login_attempts(region, phone)
+
+          Rice.Accounts.send_verification_code(
+            "sms",
+            Rice.Accounts.phone_target(region, phone),
+            @code_purpose
+          )
+        else
+          record_login_failure(region, phone, attempt, now)
+          {:error, :invalid_credentials}
+        end
     end
+  end
+
+  defp get_login_attempt(region, phone) when is_binary(region) and is_binary(phone) do
+    Repo.get_by(LoginAttempt, phone_region: region, phone: phone)
+  end
+
+  defp get_login_attempt(_, _), do: nil
+
+  # 存不存在这个管理员都记 —— 只给存在的记的话,第六次还返回 401 就等于
+  # 告诉对方"这个号不是管理员"
+  defp record_login_failure(region, phone, attempt, now)
+       when is_binary(region) and is_binary(phone) do
+    attempts = ((attempt && attempt.attempts) || 0) + 1
+
+    locked_until =
+      if attempts >= LoginAttempt.max_attempts(),
+        do: DateTime.add(now, LoginAttempt.lock_minutes() * 60, :second)
+
+    %LoginAttempt{}
+    |> LoginAttempt.changeset(%{
+      phone_region: region,
+      phone: phone,
+      attempts: attempts,
+      locked_until: locked_until
+    })
+    |> Repo.insert(
+      on_conflict: [set: [attempts: attempts, locked_until: locked_until, updated_at: now]],
+      conflict_target: [:phone_region, :phone]
+    )
+  end
+
+  defp record_login_failure(_, _, _, _), do: :ok
+
+  defp clear_login_attempts(region, phone) do
+    Repo.delete_all(
+      from a in LoginAttempt, where: a.phone_region == ^region and a.phone == ^phone
+    )
   end
 
   @doc "第二步:密码 + 验证码换令牌。密码要再验一次 —— 只有验证码不够。"
