@@ -223,7 +223,7 @@ defmodule RiceWeb.Api.AttachmentControllerTest do
       writes =
         RiceWeb.Router.__routes__()
         |> Enum.filter(&(&1.verb in [:post, :put, :patch, :delete]))
-        |> Enum.filter(&String.starts_with?(&1.path, "/api/attachments"))
+        |> Enum.filter(&(&1.path =~ ~r{^/api(/admin)?/attachments}))
 
       assert writes != [], "上传路由不见了"
 
@@ -237,6 +237,59 @@ defmodule RiceWeb.Api.AttachmentControllerTest do
 
         assert status == 401, "#{route.verb} #{route.path} 未认证时返回了 #{status}"
       end
+    end
+  end
+
+  # 管理端要传应用图标、轮播图、勋章图、公告正文,但它手上只有管理端令牌 ——
+  # C 端那个上传口不认这种令牌。少了这条路由,后台所有带图的表单都会 401,
+  # 而这件事打桩的测试看不出来:桩不管认证。
+  describe "POST /api/admin/attachments" do
+    test "管理端令牌传得上去", %{conn: conn} do
+      {_admin, token} = admin_with_token()
+      expect(Rice.Files.StorageMock, :put, fn _key, _content -> :ok end)
+
+      assert %{"data" => %{"id" => _, "kind" => "image"}} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/attachments", %{
+                 file: %Plug.Upload{
+                   path: write_tmp("PNGDATA"),
+                   filename: "logo.png",
+                   content_type: "image/png"
+                 }
+               })
+               |> json_response(201)
+    end
+
+    # 两套令牌互不通用 —— 这条路由存在的理由就是别把这个性质破坏掉
+    test "C 端令牌传不上去", %{conn: conn} do
+      {_user, token} = user_with_token()
+
+      assert conn
+             |> authed(token)
+             |> post(~p"/api/admin/attachments", %{
+               file: %Plug.Upload{
+                 path: write_tmp("PNGDATA"),
+                 filename: "logo.png",
+                 content_type: "image/png"
+               }
+             })
+             |> json_response(401)
+    end
+
+    test "管理端令牌也进不了 C 端那个上传口", %{conn: conn} do
+      {_admin, token} = admin_with_token()
+
+      assert conn
+             |> authed(token)
+             |> post(~p"/api/attachments", %{
+               file: %Plug.Upload{
+                 path: write_tmp("PNGDATA"),
+                 filename: "logo.png",
+                 content_type: "image/png"
+               }
+             })
+             |> json_response(401)
     end
   end
 end

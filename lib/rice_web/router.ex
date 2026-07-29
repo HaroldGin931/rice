@@ -187,6 +187,19 @@ defmodule RiceWeb.Router do
     delete "/post_takedowns", PostController, :delete
   end
 
+  # 管理端也要能传附件(应用图标、轮播图、勋章图、公告正文)。
+  #
+  # 不能让管理端令牌去调 C 端那个 `/api/attachments` —— 两套令牌互不通用是
+  # 有意的,为此专门写了测试。所以这里是同一个控制器挂在管理端管线上:
+  # 认证方式不同,校验和落盘逻辑完全共用。
+  #
+  # 读不用管:附件本来就是公开的。
+  scope "/api/admin", RiceWeb.Api do
+    pipe_through [:admin_api, :admin_authenticated]
+
+    post "/attachments", AttachmentController, :create
+  end
+
   # 需要登录的接口
   scope "/api", RiceWeb.Api do
     pipe_through [:api, :api_authenticated]

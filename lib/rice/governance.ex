@@ -232,8 +232,35 @@ defmodule Rice.Governance do
     |> filter_status(params["status"])
     |> filter_listed(params["listed"])
     |> filter_title(params["q"])
+    |> filter_since(params["since"])
+    |> filter_until(params["until"])
     |> Pagination.paginate(Repo, Pagination.params(params))
   end
+
+  # 后台按发布时间筛,和发放记录那边同名同语义。
+  # 解析不了就当没传 —— 一个手滑的日期不该让整个列表 500。
+  defp filter_since(query, value) do
+    case parse_time(value) do
+      {:ok, dt} -> from(p in query, where: p.inserted_at >= ^dt)
+      :error -> query
+    end
+  end
+
+  defp filter_until(query, value) do
+    case parse_time(value) do
+      {:ok, dt} -> from(p in query, where: p.inserted_at <= ^dt)
+      :error -> query
+    end
+  end
+
+  defp parse_time(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _} -> {:ok, dt}
+      _ -> :error
+    end
+  end
+
+  defp parse_time(_), do: :error
 
   defp filter_listed(query, "true"), do: from(p in query, where: p.listed == true)
   defp filter_listed(query, "false"), do: from(p in query, where: p.listed == false)

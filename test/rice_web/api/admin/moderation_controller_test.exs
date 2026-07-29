@@ -231,6 +231,41 @@ defmodule RiceWeb.Api.Admin.ModerationControllerTest do
     end
   end
 
+  # 后台的提案列表有个「发布时间」范围搜索。core 有这个筛选,
+  # 迁过来时前端还在发 since/until,而服务端不认 —— 表现是筛了等于没筛。
+  describe "提案按发布时间筛" do
+    test "范围内外分得开", %{conn: conn, token: token} do
+      old = proposal_fixture(user_fixture(), %{title: "去年的提案"})
+      Rice.Repo.update!(Ecto.Changeset.change(old, inserted_at: ~U[2025-01-01 00:00:00.000000Z]))
+      proposal_fixture(user_fixture(), %{title: "刚发的提案"})
+
+      titles = fn query ->
+        conn
+        |> authed(token)
+        |> get(~p"/api/admin/proposals?#{query}")
+        |> json_response(200)
+        |> Map.fetch!("data")
+        |> Enum.map(& &1["title"])
+      end
+
+      assert "刚发的提案" in titles.(%{since: "2026-01-01T00:00:00Z"})
+      refute "去年的提案" in titles.(%{since: "2026-01-01T00:00:00Z"})
+      assert "去年的提案" in titles.(%{until: "2026-01-01T00:00:00Z"})
+      refute "刚发的提案" in titles.(%{until: "2026-01-01T00:00:00Z"})
+    end
+
+    # 一个手滑的日期不该让整个列表 500
+    test "解析不了的时间当没传", %{conn: conn, token: token} do
+      proposal_fixture(user_fixture())
+
+      assert %{"data" => [_ | _]} =
+               conn
+               |> authed(token)
+               |> get(~p"/api/admin/proposals?since=2026-07-01")
+               |> json_response(200)
+    end
+  end
+
   describe "全站配置" do
     test "读改一体 —— core 是三个接口改同一行", %{conn: conn, token: token} do
       a = attachment_fixture(%{filename: "章程.pdf"})
