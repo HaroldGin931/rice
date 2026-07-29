@@ -44,6 +44,9 @@
   - `kind=file`:`application/pdf` `text/html` `text/plain` `application/msword`
     `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
 
+**xlsx 不在白名单里** —— 后台的批量操作模板是 Excel,所以换模板走不了这个接口,
+见 [admin/template_controller](admin/template_controller.md#模板现在传不上来)。
+
 ### 响应 `201`
 
 `data` 是附件对象。

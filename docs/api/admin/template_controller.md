@@ -30,7 +30,7 @@
 
 core 返回的是两个**裸 fileId**,前端得自己拼下载地址。这里返回结构化的附件对象。
 
-模板本身是运营上传的附件,id 放在配置里:
+模板本身是一个附件,id 放在配置里:
 
 ```elixir
 config :rice, :templates,
@@ -40,6 +40,17 @@ config :rice, :templates,
 
 没配、或者配了个不存在的 id,那一项就是 `null` —— 不是 500。模板缺失不该让
 整个后台报错。
+
+### 模板现在传不上来
+
+`POST /api/attachments` 的 content-type 白名单里**没有 xlsx**
+(见 [attachment_controller](../attachment_controller.md#限制))。也就是说
+换一版模板没法从 rice 走,只能靠 `mix rice.import` 带进来或直接写库。
+
+core 那边上传**完全不校验类型**,所以没这个问题 —— 这是 rice 收紧白名单时
+连带出来的。要支持的话,把
+`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+加进 `Rice.Files` 的 `file` 白名单即可。
 
 ## 谁消费这些模板
 

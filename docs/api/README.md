@@ -29,6 +29,15 @@
 | [proposal_vote](proposal_vote_controller.md) | `ProposalVoteController` | 投票 |
 | [proposal_comment](proposal_comment_controller.md) | `ProposalCommentController` | 提案评论 |
 
+### 浏览器流程(不在 `/api` 下)
+
+这两个不遵守下面的约定 —— 它们返回 HTML 跳转,不是 JSON。
+
+| 文档 | 控制器 | 管什么 |
+| --- | --- | --- |
+| [semi_auth](semi_auth_controller.md) | `SemiAuthController` | Login with Semi(OAuth + PKCE)与会话交接 |
+| [page](page_controller.md) | `PageController` | 调试用的落地页 |
+
 ### 管理端(`/api/admin/*`)
 
 | 文档 | 控制器 | 管什么 |
@@ -119,7 +128,7 @@ core 那套「HTTP 永远 200,靠信封里的 `code` 判断成败」在这里没
 
 | 状态码 | 什么时候 |
 | --- | --- |
-| `400` | 请求本身畸形 |
+| `400` | 请求体不是合法 JSON —— 由 `Plug.Parsers` 抛出,没有哪个 action 会主动返回它 |
 | `401` | 没令牌 / 令牌无效或已撤销 |
 | `403` | 令牌有效但权限不够 |
 | `404` | 资源不存在(**或者不该让你知道它存在**) |

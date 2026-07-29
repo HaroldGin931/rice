@@ -45,7 +45,9 @@ core 的 `NodeListVo` 把节点主的 did 和稻米数**摊平在顶层**;这里
 
 ## `GET /api/nodes/members`
 
-节点成员名单(`node_member = true` 的用户)。公开,不分页。
+节点成员名单(`node_member = true` 的用户)。公开,不分页,按 id 升序。
+
+已停用和已注销的用户不在名单里。
 
 ### 响应 `200`
 

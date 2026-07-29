@@ -106,7 +106,11 @@
 | 状态码 | 什么时候 |
 | --- | --- |
 | `403` | 这不是你的提案 —— 不假装成功 |
-| `404` | 提案不存在 |
+| `404` | 提案不存在,**或已被后台下架** |
+
+C 端的所有提案接口(详情、删除、投票、评论)走的都是同一个「只看上架的」查询。
+下架之后作者自己也操作不了 —— 这是有意的。后台那份看得到,见
+[admin/proposal_controller](admin/proposal_controller.md)。
 
 投票见 [proposal_vote_controller](proposal_vote_controller.md),
 评论见 [proposal_comment_controller](proposal_comment_controller.md)。
