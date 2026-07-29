@@ -159,14 +159,38 @@ defmodule RiceWeb.Api.Admin.GrainControllerTest do
              |> json_response(422)
     end
 
-    test "停用的用户收不到", %{conn: conn, token: token, code: code} do
-      user = user_fixture(%{phone: "13800005555", phone_region: "86"})
+    # 按手机号找和按 DID 找必须是同一个结果。原先联系方式那条路排除了停用的,
+    # id/DID/handle 那条路没排除 —— 同一个人换个写法就发得出去了。
+    test "停用的用户收不到,五种写法都收不到", %{conn: conn, token: token, code: code} do
+      user =
+        user_fixture(%{
+          phone: "13800005555",
+          phone_region: "86",
+          email: "disabled@example.com",
+          handle: "disabled.web5.xjdao.test"
+        })
+
       Rice.Repo.update!(Ecto.Changeset.change(user, disabled_at: DateTime.utc_now()))
 
-      assert conn
-             |> authed(token)
-             |> post(~p"/api/admin/grain_grants", %{to: ["13800005555"], amount: 10, code: code})
-             |> json_response(422)
+      for identifier <- [
+            "13800005555",
+            "disabled@example.com",
+            "disabled.web5.xjdao.test",
+            user.did,
+            user.id
+          ] do
+        assert conn
+               |> authed(token)
+               |> post(~p"/api/admin/grain_grants", %{
+                 to: [identifier],
+                 amount: 10,
+                 code: code
+               })
+               |> json_response(422),
+               "#{identifier} 不该发得出去"
+      end
+
+      assert Rice.Repo.get!(Rice.Accounts.User, user.id).grain_balance == 0
     end
 
     test "发放后账本自洽", %{conn: conn, token: token, code: code} do

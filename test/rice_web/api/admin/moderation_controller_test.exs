@@ -149,6 +149,86 @@ defmodule RiceWeb.Api.Admin.ModerationControllerTest do
       assert one["email"] == "sun@example.com"
       assert one["awarded_at"]
     end
+
+    # core 的 medal/create 收一个名单文件,建和发是同一次调用。
+    # 只建不发的话,这个后台就没有任何发勋章的入口了。
+    test "建的时候把名单一起发了", %{conn: conn, token: token} do
+      a = user_fixture(%{phone: "13800007777", phone_region: "86"})
+      b = user_fixture(%{handle: "bb.web5.xjdao.test"})
+
+      assert %{"data" => badge} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/badges", %{
+                 name: "首批共建者",
+                 to: ["13800007777", "bb.web5.xjdao.test"]
+               })
+               |> json_response(201)
+
+      assert %{"data" => holders} =
+               build_conn()
+               |> authed(token)
+               |> get(~p"/api/admin/badges/#{badge["id"]}/holders")
+               |> json_response(200)
+
+      assert Enum.map(holders, & &1["id"]) |> Enum.sort() == Enum.sort([a.id, b.id])
+    end
+
+    # 名单里一个笔误就留下一枚没有持有人的孤儿勋章 —— 所以建和发在一个事务里
+    test "名单里有人认不出来,勋章也不建", %{conn: conn, token: token} do
+      user_fixture(%{phone: "13800008888", phone_region: "86"})
+
+      assert %{"errors" => %{"to" => [message]}} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/badges", %{
+                 name: "不该被建出来",
+                 to: ["13800008888", "查无此人@example.com"]
+               })
+               |> json_response(422)
+
+      assert message =~ "查无此人@example.com"
+      refute Rice.Repo.get_by(Rice.Community.Badge, name: "不该被建出来")
+    end
+
+    test "不带名单也能建 —— 空勋章是合法的", %{conn: conn, token: token} do
+      assert %{"data" => badge} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/badges", %{name: "先建着"})
+               |> json_response(201)
+
+      assert badge["name"] == "先建着"
+    end
+
+    test "名单里不是字符串时 422 而不是 500", %{conn: conn, token: token} do
+      assert %{"errors" => %{"to" => [_]}} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/badges", %{name: "坏名单", to: [nil, 123]})
+               |> json_response(422)
+    end
+
+    test "名单里重复的人只发一次", %{conn: conn, token: token} do
+      user = user_fixture(%{phone: "13800009000", phone_region: "86"})
+
+      assert %{"data" => badge} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/badges", %{
+                 name: "去重",
+                 to: ["13800009000", "13800009000", user.did]
+               })
+               |> json_response(201)
+
+      assert %{"data" => holders} =
+               build_conn()
+               |> authed(token)
+               |> get(~p"/api/admin/badges/#{badge["id"]}/holders")
+               |> json_response(200)
+
+      assert length(holders) == 1
+    end
   end
 
   describe "全站配置" do

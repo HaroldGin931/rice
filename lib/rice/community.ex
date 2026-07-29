@@ -91,13 +91,62 @@ defmodule Rice.Community do
     end
   end
 
-  def create_badge(attrs) do
-    %Badge{}
-    |> Badge.changeset(Map.new(attrs, fn {k, v} -> {to_string(k), v} end))
-    |> Repo.insert()
-    |> case do
-      {:ok, badge} -> {:ok, Repo.preload(badge, :image)}
-      other -> other
+  @doc """
+  建一枚勋章,可以顺带发给一批人。
+
+  `recipients` 是手机号 / 邮箱 / handle / DID / rice id 的数组,和发放稻米认的
+  写法一样。**建和发在同一个事务里** —— core 也是一次调用干完这两件事
+  (`medal/create` 收一个名单文件)。分成两步的话,名单里有一个笔误就会留下
+  一枚没有持有人的孤儿勋章,而名单恰恰是最容易出错的地方。
+
+  全有或全无:任何一个收款人解析不出来,勋章也不建。
+  """
+  def create_badge(attrs, recipients \\ []) do
+    attrs = Map.new(attrs, fn {k, v} -> {to_string(k), v} end)
+
+    with {:ok, users} <- resolve_recipients(recipients) do
+      Ecto.Multi.new()
+      |> Ecto.Multi.insert(:badge, Badge.changeset(%Badge{}, attrs))
+      |> award_all(users)
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{badge: badge}} -> {:ok, Repo.preload(badge, :image)}
+        {:error, _step, reason, _} -> {:error, reason}
+      end
+    end
+  end
+
+  defp award_all(multi, users) do
+    Enum.reduce(users, multi, fn user, acc ->
+      Ecto.Multi.insert(acc, {:award, user.id}, fn %{badge: badge} ->
+        BadgeAward.changeset(%BadgeAward{}, %{badge_id: badge.id, user_id: user.id})
+      end)
+    end)
+  end
+
+  # 收款人的写法和发放稻米保持一致 —— 运营在两个界面里粘的是同一份名单
+  defp resolve_recipients([]), do: {:ok, []}
+
+  defp resolve_recipients(recipients) when is_list(recipients) do
+    case Enum.reject(recipients, &is_binary/1) do
+      [] -> match_recipients(recipients)
+      bad -> {:error, {:invalid_recipients, bad}}
+    end
+  end
+
+  defp resolve_recipients(_), do: {:error, :invalid_recipients}
+
+  defp match_recipients(recipients) do
+    found =
+      recipients
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+      |> Enum.map(&{&1, Rice.Accounts.find_user(&1)})
+
+    case Enum.filter(found, fn {_, user} -> is_nil(user) end) do
+      [] -> {:ok, found |> Enum.map(&elem(&1, 1)) |> Enum.uniq_by(& &1.id)}
+      missing -> {:error, {:unknown_recipients, Enum.map(missing, &elem(&1, 0))}}
     end
   end
 

@@ -106,27 +106,8 @@ defmodule Rice.Admin.Grants do
     end
   end
 
-  defp resolve(identifier) do
-    Rice.Accounts.get_public_user(identifier) || by_contact(identifier)
-  end
-
-  defp by_contact(identifier) do
-    cond do
-      String.contains?(identifier, "@") ->
-        Repo.one(
-          from u in active(),
-            where: fragment("lower(?)", u.email) == ^String.downcase(identifier)
-        )
-
-      Regex.match?(~r/^\d{5,20}$/, identifier) ->
-        Repo.one(from u in active(), where: u.phone == ^identifier)
-
-      true ->
-        nil
-    end
-  end
-
-  defp active, do: from(u in User, where: is_nil(u.deleted_at) and is_nil(u.disabled_at))
+  # 和发勋章认同一套写法 —— 运营在两个界面里粘的是同一份名单
+  defp resolve(identifier), do: Rice.Accounts.find_user(identifier)
 
   @doc "发放记录。可按收款人和时间范围筛。"
   def list_grants(params \\ %{}) do

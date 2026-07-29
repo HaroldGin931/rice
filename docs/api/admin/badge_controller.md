@@ -41,16 +41,37 @@
 
 ## `POST /api/admin/badges`
 
-新建勋章。
+新建勋章,可以顺带发给一批人。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `name` | string | 是 | 最长 64 |
 | `image_id` | string | 否 | 图片附件 id |
+| `to` | string[] | 否 | 首批持有人:手机号 / 邮箱 / handle / DID / id |
 
-响应 `201`,`data` 是勋章对象(`holder_count` 为 `null`)。
+`to` 的写法和[发放稻米](grain_controller.md#收款人怎么写)完全一致 ——
+运营在两个界面里粘的是同一份名单。重复的只算一次,空字符串丢掉,
+停用和已注销的用户认不出来。
 
-`422` —— 名字为空或超长。
+### 建和发在一个事务里
+
+core 的 `medal/create` 收一个名单**文件**,建勋章和发勋章是同一次调用。这里收数组
+(解析 Excel 是前端的事),但语义一样:**名单里有一个人认不出来,勋章也不建**。
+
+分两步的话,名单里一个笔误就会留下一枚没有持有人的孤儿勋章 ——
+而名单恰恰是最容易出错的地方。
+
+### 响应 `201`
+
+`data` 是勋章对象(`holder_count` 为 `null`)。
+
+### 错误
+
+| 状态码 | body |
+| --- | --- |
+| `422` | `{"errors":{"name":["不能为空"]}}` |
+| `422` | `{"errors":{"to":["这些用户不存在: 13800000000"]}}` |
+| `422` | `{"errors":{"to":["名单里必须是字符串,这些不是: nil"]}}` |
 
 ---
 
@@ -89,13 +110,11 @@
 
 `404` —— 勋章不存在。
 
-## 发放勋章
+## 给一枚已有的勋章补发持有人
 
-**没有发放接口 —— core 也没有。** core 的管理端只有这三个勋章接口
-(`medal/create`、`medal/page`、`medal/users-holding/page`),三个都迁过来了。
-勋章数据是直接写库的。
+**没有这个接口 —— core 也没有。** 发勋章只能在新建的时候一起发,
+建完之后加不了人。
 
-奇怪的是 core 的 `/admin/template/get` 返回了一个「勋章发放」的 Excel 模板
-(rice 照迁,见 [template_controller](template_controller.md)),但两边都没有
-消费这个模板的接口。要做批量发放的话,写入路径(`Rice.Community` 的
-`BadgeAward`)已经就绪,缺的只是一个控制器。
+core 的三个勋章接口(`medal/create`、`medal/page`、`medal/users-holding/page`)
+都迁过来了,这是 core 本身的形状。要补发的话,写入路径
+(`Rice.Community.award_badge/2`)已经就绪,缺的只是一个控制器。

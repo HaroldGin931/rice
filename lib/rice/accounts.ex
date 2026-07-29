@@ -70,6 +70,47 @@ defmodule Rice.Accounts do
 
   def get_public_user(_), do: nil
 
+  @doc """
+  后台按运营输入的任意写法找人:rice id / DID / handle / 邮箱 / 手机号。
+
+  只给**后台**用 —— 它认联系方式,放在公开接口上就是一个"这个手机号注册过没有"
+  的探测器(所以 `get_public_user/1` 不认)。
+
+  停用和已注销的都找不到。发勋章、发稻米都用这个:早先发稻米那边是
+  `get_public_user/1` 兜底再查联系方式,结果按手机号找不到停用的用户、
+  按 DID 却找得到,同一个人两种写法两个结果。
+  """
+  def find_user(identifier) when is_binary(identifier) do
+    identifier = String.trim(identifier)
+
+    enabled(get_public_user(identifier)) || find_by_contact(identifier)
+  end
+
+  def find_user(_), do: nil
+
+  defp enabled(%User{disabled_at: nil} = user), do: user
+  defp enabled(_), do: nil
+
+  defp find_by_contact(identifier) do
+    cond do
+      String.contains?(identifier, "@") ->
+        Repo.one(
+          from u in enabled_users(),
+            where: fragment("lower(?)", u.email) == ^String.downcase(identifier),
+            preload: [:avatar]
+        )
+
+      Regex.match?(~r/^\d{5,20}$/, identifier) ->
+        Repo.one(from u in enabled_users(), where: u.phone == ^identifier, preload: [:avatar])
+
+      true ->
+        nil
+    end
+  end
+
+  defp enabled_users,
+    do: from(u in User, where: is_nil(u.deleted_at) and is_nil(u.disabled_at))
+
   # 软删的行留在库里(外键要指得到),但任何查询都不该看见它们
   defp active_users, do: from(u in User, where: is_nil(u.deleted_at))
 
