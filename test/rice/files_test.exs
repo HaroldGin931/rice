@@ -144,6 +144,36 @@ defmodule Rice.FilesTest do
       end
     end
 
+    # 后台批量发放的模板是 Excel。没有这两项,换一版模板根本传不上来。
+    test "收 Excel —— 后台的批量操作模板要靠它上传" do
+      for good <- [
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          ] do
+        expect(Rice.Files.StorageMock, :put, fn _key, _content -> :ok end)
+
+        assert {:ok, _} =
+                 Files.create_attachment("x", %{
+                   kind: "file",
+                   filename: "稻米发放模板.xlsx",
+                   content_type: good
+                 }),
+               "应该接受 #{good}"
+      end
+    end
+
+    # 表格只算"文件",不算图片 —— kind 和 content_type 得对得上
+    test "Excel 走 kind=file,当成图片传是不行的" do
+      assert {:error, changeset} =
+               Files.create_attachment("x", %{
+                 kind: "image",
+                 filename: "模板.xlsx",
+                 content_type: "application/vnd.ms-excel"
+               })
+
+      assert "不支持的文件类型" in errors_on(changeset).content_type
+    end
+
     # 顺序很重要:校验失败时绝不该碰存储。Mox 的 verify_on_exit! 会确认
     # put 一次都没被调用 —— 没有 expect 就意味着"不允许调用"。
     test "校验失败时不写存储" do

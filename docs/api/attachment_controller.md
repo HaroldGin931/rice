@@ -41,11 +41,15 @@
 - 大小上限 **20 MB**
 - content-type 走白名单:
   - `kind=image`:`image/png` `image/jpeg` `image/gif` `image/webp` `image/svg+xml`
-  - `kind=file`:`application/pdf` `text/html` `text/plain` `application/msword`
+  - `kind=file`:`application/pdf` `text/html` `text/plain`
+    `application/msword`
     `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+    `application/vnd.ms-excel`
+    `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
 
-**xlsx 不在白名单里** —— 后台的批量操作模板是 Excel,所以换模板走不了这个接口,
-见 [admin/template_controller](admin/template_controller.md#模板现在传不上来)。
+表格新旧格式都收 —— 后台的批量操作模板是 Excel,见
+[admin/template_controller](admin/template_controller.md)。注意它算 `file`
+不算 `image`,`kind` 传错一样会被拒。
 
 ### 响应 `201`
 

@@ -16,11 +16,17 @@ defmodule Rice.Files do
   alias Rice.Repo
 
   # 与 core 的行为对齐:只收图片和文档。上传端点接上去时这就是白名单。
+  #
+  # 表格是后来补的:后台批量发放的模板是 Excel,没有这两项的话换一版模板
+  # 根本传不上来。新旧格式都收 —— 和 doc/docx 一样,运营的 Excel 存成
+  # 哪个版本不由我们决定。
   @allowed_content_types %{
     "image" => ~w(image/png image/jpeg image/gif image/webp image/svg+xml),
     "file" => ~w(application/pdf text/html text/plain
                  application/msword
-                 application/vnd.openxmlformats-officedocument.wordprocessingml.document)
+                 application/vnd.openxmlformats-officedocument.wordprocessingml.document
+                 application/vnd.ms-excel
+                 application/vnd.openxmlformats-officedocument.spreadsheetml.sheet)
   }
 
   @max_byte_size 20 * 1024 * 1024

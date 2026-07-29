@@ -41,16 +41,12 @@ config :rice, :templates,
 没配、或者配了个不存在的 id,那一项就是 `null` —— 不是 500。模板缺失不该让
 整个后台报错。
 
-### 模板现在传不上来
+### 换模板
 
-`POST /api/attachments` 的 content-type 白名单里**没有 xlsx**
-(见 [attachment_controller](../attachment_controller.md#限制))。也就是说
-换一版模板没法从 rice 走,只能靠 `mix rice.import` 带进来或直接写库。
+传 [`POST /api/attachments`](../attachment_controller.md)(`kind=file`),
+拿到 id 之后改配置。xls 和 xlsx 都在白名单里。
 
-core 那边上传**完全不校验类型**,所以没这个问题 —— 这是 rice 收紧白名单时
-连带出来的。要支持的话,把
-`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
-加进 `Rice.Files` 的 `file` 白名单即可。
+`kind` 要传 `file` —— 表格不算图片,传 `image` 会被拒。
 
 ## 谁消费这些模板
 
