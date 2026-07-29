@@ -1,14 +1,27 @@
 defmodule Rice.Pagination do
   @moduledoc """
-  Keyset(游标)分页,替掉 core 的 `PagedData{pageIndex, pageSize, total}`。
+  两种分页,同一个入口。默认是 keyset(游标),传了 `page` 就切成页码。
+
+  ## 游标(默认)
 
   用 TSID 主键当游标 —— 字典序即时间序,所以 `id < cursor` 就是"更早的那一页",
-  不需要 `OFFSET`(深翻页会全表扫),也不需要 `COUNT(*)`(列表页基本用不上,
+  不需要 `OFFSET`(深翻页会全表扫),也不需要 `COUNT(*)`(信息流用不上,
   而且在大表上是最贵的一次查询)。
 
       %{entries: [...], next_cursor: "3ke6kg3wk223e" | nil}
 
   默认按 id 倒序(新的在前)。`order: :asc` 用于 position 排序的内容位。
+
+  ## 页码(传 `page` 时)
+
+      %{entries: [...], next_cursor: ..., total: 137, page: 3, per_page: 15}
+
+  游标分页翻不到"第 7 页" —— 它只知道下一页。管理后台的表格是页码式的:
+  运营要跳页、要知道一共多少条。这两件事游标都给不了,所以后台列表按页码走。
+
+  代价是每次多一条 `COUNT(*)`,以及深翻页的 `OFFSET`。在后台这是划算的:
+  数据量是运营级别的(几千条),而且人在看,并发量约等于零。C 端的信息流
+  仍然走游标 —— 那里才是深翻页和高并发同时出现的地方。
   """
   import Ecto.Query
 
@@ -17,26 +30,70 @@ defmodule Rice.Pagination do
 
   @type opts :: [limit: pos_integer(), before: String.t() | nil, after: String.t() | nil]
 
-  @doc "从请求参数里解析出分页选项。非法输入一律退回默认值,不报错。"
+  @doc """
+  从请求参数里解析出分页选项。非法输入一律退回默认值,不报错。
+
+  认 `page` / `per_page` 时进页码模式;`per_page` 不传就沿用 `limit` 的默认值。
+  """
   @spec params(map()) :: %{
           limit: pos_integer(),
           before: String.t() | nil,
-          after: String.t() | nil
+          after: String.t() | nil,
+          page: pos_integer() | nil
         }
   def params(params) when is_map(params) do
     %{
-      limit: parse_limit(params["limit"]),
+      limit: parse_limit(params["per_page"] || params["limit"]),
       before: parse_cursor(params["before"]),
-      after: parse_cursor(params["after"])
+      after: parse_cursor(params["after"]),
+      page: parse_page(params["page"])
     }
   end
+
+  @doc """
+  响应里 `meta` 的内容。游标模式只有 `next_cursor`,页码模式多三项。
+
+  统一走这里,免得每个 JSON 视图各拼各的 —— 漏一个 `total`,前端的分页器
+  就只剩一页。
+  """
+  def meta(%{page: page, total: total, per_page: per_page, next_cursor: cursor}) do
+    %{next_cursor: cursor, total: total, page: page, per_page: per_page}
+  end
+
+  def meta(%{next_cursor: cursor}), do: %{next_cursor: cursor}
 
   @doc "把分页条件套到 query 上。多取一条用来判断还有没有下一页。"
   @spec paginate(Ecto.Query.t(), Ecto.Repo.t(), map(), keyword()) :: %{
           entries: list(),
           next_cursor: String.t() | nil
         }
-  def paginate(query, repo, %{limit: limit} = opts, config \\ []) do
+  def paginate(query, repo, opts, config \\ [])
+
+  def paginate(query, repo, %{page: page, limit: per_page}, config) when is_integer(page) do
+    order = Keyword.get(config, :order, :desc)
+
+    # COUNT 和取数据是两条查询,不在一个事务里 —— 中间插进来一行,
+    # total 会比实际多/少一条。后台表格能接受这个,加个事务不值当。
+    total = repo.aggregate(exclude(query, :preload), :count)
+
+    entries =
+      query
+      |> apply_order(order)
+      |> limit(^per_page)
+      |> offset(^((page - 1) * per_page))
+      |> repo.all()
+
+    %{
+      entries: entries,
+      # 页码模式下也给游标,这样同一个接口两种翻法都能用
+      next_cursor: if(page * per_page < total, do: last_id(entries)),
+      total: total,
+      page: page,
+      per_page: per_page
+    }
+  end
+
+  def paginate(query, repo, %{limit: limit} = opts, config) do
     order = Keyword.get(config, :order, :desc)
 
     entries =
@@ -48,9 +105,12 @@ defmodule Rice.Pagination do
 
     case Enum.split(entries, limit) do
       {page, []} -> %{entries: page, next_cursor: nil}
-      {page, _more} -> %{entries: page, next_cursor: page |> List.last() |> Map.fetch!(:id)}
+      {page, _more} -> %{entries: page, next_cursor: last_id(page)}
     end
   end
+
+  defp last_id([]), do: nil
+  defp last_id(entries), do: entries |> List.last() |> Map.fetch!(:id)
 
   defp apply_cursor(query, %{before: nil, after: nil}, _order), do: query
 
@@ -87,6 +147,21 @@ defmodule Rice.Pagination do
   end
 
   defp parse_cursor(_), do: nil
+
+  # 没传 page 就是游标模式。传了个非法的值当第 1 页 —— 和游标一样,
+  # 输入坏了退回第一页比 500 合理。
+  defp parse_page(nil), do: nil
+  defp parse_page(value) when is_integer(value) and value > 0, do: value
+  defp parse_page(value) when is_integer(value), do: 1
+
+  defp parse_page(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {n, ""} when n > 0 -> n
+      _ -> 1
+    end
+  end
+
+  defp parse_page(_), do: nil
 
   def default_limit, do: @default_limit
   def max_limit, do: @max_limit

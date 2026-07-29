@@ -76,7 +76,8 @@ core 的 batch 收一个上传文件的 `fileId`,由服务端去解析表格。�
 | `q` | 按收款人模糊搜:昵称 / 邮箱 / 手机号 / handle |
 | `since` | ISO 8601,起始时间 |
 | `until` | ISO 8601,结束时间 |
-| `limit` `before` `after` | 见 [分页](../README.md#分页) |
+| `page` `per_page` | 后台表格用页码,见 [分页](../README.md#页码传-page-时) |
+| `limit` `before` `after` | 也支持游标,见 [分页](../README.md#分页) |
 
 `since` / `until` 解析不了就**当没传** —— 一个手滑的日期不该让整个列表 500。
 
@@ -114,7 +115,8 @@ core 的 batch 收一个上传文件的 `fileId`,由服务端去解析表格。�
 
 | 参数 | 说明 |
 | --- | --- |
-| `limit` `before` `after` | 见 [分页](../README.md#分页) |
+| `page` `per_page` | 后台表格用页码,见 [分页](../README.md#页码传-page-时) |
+| `limit` `before` `after` | 也支持游标,见 [分页](../README.md#分页) |
 
 响应 `200`,`data` 是转账对象数组,形状见
 [grain_transfer_controller](../grain_transfer_controller.md#转账对象)。

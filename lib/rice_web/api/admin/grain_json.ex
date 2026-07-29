@@ -4,7 +4,7 @@ defmodule RiceWeb.Api.Admin.GrainJSON do
   def index(%{page: page}) do
     %{
       data: Enum.map(page.entries, &grant/1),
-      meta: %{next_cursor: page.next_cursor}
+      meta: Rice.Pagination.meta(page)
     }
   end
 
@@ -12,7 +12,7 @@ defmodule RiceWeb.Api.Admin.GrainJSON do
   def transfers(%{page: page, user: user}) do
     %{
       data: Enum.map(page.entries, &GrainTransferJSON.data(&1, user)),
-      meta: %{next_cursor: page.next_cursor}
+      meta: Rice.Pagination.meta(page)
     }
   end
 

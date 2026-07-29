@@ -42,7 +42,8 @@
 | `status` | `open` / `passed` / `rejected` |
 | `listed` | `true` / `false` |
 | `q` | 按标题模糊搜 |
-| `limit` `before` `after` | 见 [分页](../README.md#分页) |
+| `page` `per_page` | 后台表格用页码,见 [分页](../README.md#页码传-page-时) |
+| `limit` `before` `after` | 也支持游标,见 [分页](../README.md#分页) |
 
 **这份列表看得到已下架和已软删的提案。** C 端那份看不到。
 

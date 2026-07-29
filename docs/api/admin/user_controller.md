@@ -48,7 +48,8 @@
 | `q` | 模糊搜:昵称 / handle / DID / 邮箱 / 手机号 |
 | `node_member` | `true` / `false` |
 | `disabled` | `true` / `false` |
-| `limit` `before` `after` | 见 [分页](../README.md#分页) |
+| `page` `per_page` | 后台表格用页码,见 [分页](../README.md#页码传-page-时) |
+| `limit` `before` `after` | 也支持游标,见 [分页](../README.md#分页) |
 
 组合起来就覆盖了 core 那五个列表接口:节点成员列表是
 `?node_member=true`,「未绑定节点的用户搜索」是 `?q=…&node_member=false`。

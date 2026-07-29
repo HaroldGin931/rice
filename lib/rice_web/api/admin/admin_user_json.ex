@@ -2,7 +2,7 @@ defmodule RiceWeb.Api.Admin.AdminUserJSON do
   alias RiceWeb.Api.AttachmentJSON
 
   def index(%{page: page}) do
-    %{data: Enum.map(page.entries, &data/1), meta: %{next_cursor: page.next_cursor}}
+    %{data: Enum.map(page.entries, &data/1), meta: Rice.Pagination.meta(page)}
   end
 
   def show(%{admin: admin}), do: %{data: data(admin)}

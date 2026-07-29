@@ -2,13 +2,13 @@ defmodule RiceWeb.Api.Admin.BadgeJSON do
   alias RiceWeb.Api.{AttachmentJSON, UserJSON}
 
   def index(%{page: page}) do
-    %{data: Enum.map(page.entries, &data/1), meta: %{next_cursor: page.next_cursor}}
+    %{data: Enum.map(page.entries, &data/1), meta: Rice.Pagination.meta(page)}
   end
 
   def show(%{badge: badge}), do: %{data: data(badge)}
 
   def holders(%{page: page}) do
-    %{data: Enum.map(page.entries, &holder/1), meta: %{next_cursor: page.next_cursor}}
+    %{data: Enum.map(page.entries, &holder/1), meta: Rice.Pagination.meta(page)}
   end
 
   defp data(badge) do

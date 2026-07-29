@@ -14,7 +14,8 @@
 
 | 参数 | 说明 |
 | --- | --- |
-| `limit` `before` `after` | 见 [分页](../README.md#分页) |
+| `page` `per_page` | 后台表格用页码,见 [分页](../README.md#页码传-page-时) |
+| `limit` `before` `after` | 也支持游标,见 [分页](../README.md#分页) |
 
 ### 响应 `200`
 
@@ -60,7 +61,8 @@
 | 参数 | 说明 |
 | --- | --- |
 | `q` | 按持有人模糊搜 |
-| `limit` `before` `after` | 见 [分页](../README.md#分页) |
+| `page` `per_page` | 后台表格用页码,见 [分页](../README.md#页码传-page-时) |
+| `limit` `before` `after` | 也支持游标,见 [分页](../README.md#分页) |
 
 `q` 里的 `%` `_` 做了转义。
 
