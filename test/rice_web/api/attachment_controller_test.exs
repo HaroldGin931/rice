@@ -243,6 +243,66 @@ defmodule RiceWeb.Api.AttachmentControllerTest do
   # 管理端要传应用图标、轮播图、勋章图、公告正文,但它手上只有管理端令牌 ——
   # C 端那个上传口不认这种令牌。少了这条路由,后台所有带图的表单都会 401,
   # 而这件事打桩的测试看不出来:桩不管认证。
+  # 附件是公开可读的,而上传只要登录 —— 任何用户都能传一个 html 再把链接发给别人。
+  # 在 rice 同源下打开它,脚本就拿到了这个源。
+  describe "可执行类型不能在同源里跑起来" do
+    test "html 强制下载,即使没传 download", %{conn: conn} do
+      expect(Rice.Files.StorageMock, :get, fn _ -> {:ok, "<script>alert(1)</script>"} end)
+      attachment = stored_fixture(%{filename: "evil.html", content_type: "text/html"})
+
+      conn = get(conn, ~p"/api/attachments/#{attachment.id}")
+
+      assert [disposition] = get_resp_header(conn, "content-disposition")
+      assert disposition =~ "attachment;"
+      refute disposition =~ "inline"
+    end
+
+    test "svg 也是 —— 直接打开时它能跑脚本", %{conn: conn} do
+      expect(Rice.Files.StorageMock, :get, fn _ -> {:ok, "<svg onload=alert(1)>"} end)
+      attachment = stored_fixture(%{filename: "evil.svg", content_type: "image/svg+xml"})
+
+      conn = get(conn, ~p"/api/attachments/#{attachment.id}")
+
+      assert [disposition] = get_resp_header(conn, "content-disposition")
+      assert disposition =~ "attachment;"
+    end
+
+    test "带上 sandbox 和 nosniff", %{conn: conn} do
+      expect(Rice.Files.StorageMock, :get, fn _ -> {:ok, "<script>alert(1)</script>"} end)
+      attachment = stored_fixture(%{filename: "evil.html", content_type: "text/html"})
+
+      conn = get(conn, ~p"/api/attachments/#{attachment.id}")
+
+      assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
+      assert [csp] = get_resp_header(conn, "content-security-policy")
+      assert csp =~ "sandbox"
+      assert csp =~ "default-src 'none'"
+    end
+  end
+
+  # 强制下载不能一刀切 —— banner 图内联展示是正常用法
+  describe "图片仍然内联" do
+    test "png 默认 inline", %{conn: conn} do
+      expect(Rice.Files.StorageMock, :get, fn _ -> {:ok, "PNG"} end)
+      attachment = stored_fixture(%{filename: "banner.png", content_type: "image/png"})
+
+      conn = get(conn, ~p"/api/attachments/#{attachment.id}")
+
+      assert [disposition] = get_resp_header(conn, "content-disposition")
+      assert disposition =~ "inline;"
+    end
+
+    test "?download=1 时才下载", %{conn: conn} do
+      expect(Rice.Files.StorageMock, :get, fn _ -> {:ok, "PNG"} end)
+      attachment = stored_fixture(%{filename: "banner.png", content_type: "image/png"})
+
+      conn = get(conn, ~p"/api/attachments/#{attachment.id}?download=1")
+
+      assert [disposition] = get_resp_header(conn, "content-disposition")
+      assert disposition =~ "attachment;"
+    end
+  end
+
   describe "POST /api/admin/attachments" do
     test "管理端令牌传得上去", %{conn: conn} do
       {_admin, token} = admin_with_token()

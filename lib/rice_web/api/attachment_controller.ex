@@ -47,6 +47,10 @@ defmodule RiceWeb.Api.AttachmentController do
       # 附件内容按 id 不可变(改内容就是新 id),可以放心长缓存
       |> put_resp_header("cache-control", "public, max-age=31536000, immutable")
       |> put_resp_header("etag", etag(attachment))
+      # 别让浏览器去猜类型 —— 猜出个 text/html 就等于绕过了下面那道防线
+      |> put_resp_header("x-content-type-options", "nosniff")
+      # 就算真被当页面打开了,这条也让脚本、取数、表单一律动不了
+      |> put_resp_header("content-security-policy", "default-src 'none'; sandbox")
       |> send_resp(200, content)
     end
   end
@@ -60,13 +64,30 @@ defmodule RiceWeb.Api.AttachmentController do
     end
   end
 
-  # 默认内联展示(banner/公告 html 都要内联),`?download=1` 时才强制下载。
+  # 浏览器打开就会执行脚本的类型。附件是**公开可读**的,而上传只要登录 ——
+  # 任何用户都能传一个 html 上去,再把链接发给别人。在 rice 同源下打开它,
+  # 脚本就拿到了这个源(比如 Semi 登录交接用的会话 cookie)。
+  @executable ~w(text/html application/xhtml+xml image/svg+xml)
+
+  # 默认内联展示(banner 图要内联),`?download=1` 时强制下载。
+  #
+  # **可执行类型一律强制下载**,不管 `download` 传没传。这不影响任何人:
+  # 公告正文两端都是 `fetch()` 之后自己渲染的,而 `fetch` 根本不看这个头;
+  # `<img>` 也不看。受影响的只有"直接在浏览器地址栏里打开附件"这一种用法,
+  # 而那正是要挡的。
+  #
   # 文件名做 RFC 5987 编码 —— 线上文件名含中文、空格和全角括号,
   # 直接塞进头里会被截断甚至构造出额外的响应头。
   defp disposition(conn, attachment) do
-    kind = if conn.params["download"] in ~w(1 true), do: "attachment", else: "inline"
+    forced = attachment.content_type in @executable
+    asked = conn.params["download"] in ~w(1 true)
+    kind = if forced or asked, do: "attachment", else: "inline"
+
     "#{kind}; filename*=UTF-8''#{URI.encode(attachment.filename, &URI.char_unreserved?/1)}"
   end
+
+  @doc false
+  def executable_types, do: @executable
 
   defp etag(%{checksum: nil, id: id}), do: ~s("#{id}")
   defp etag(%{checksum: checksum}), do: ~s("#{checksum}")

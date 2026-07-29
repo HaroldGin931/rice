@@ -225,17 +225,42 @@ defmodule Rice.Accounts do
 
           # 定长比较,避免按字符早退泄露信息
           not :crypto.hash_equals(record.code_hash, VerificationCode.hash(code)) ->
-            Repo.update!(Ecto.Changeset.change(record, attempts: record.attempts + 1))
+            bump_attempts(record)
             {:error, :invalid_code}
 
           true ->
-            Repo.update!(Ecto.Changeset.change(record, consumed_at: now))
-            :ok
+            consume_code(record, now)
         end
     end
   end
 
   def verify_code(_, _, _, _), do: {:error, :invalid_code}
+
+  @doc """
+  把一条验证码标记成已消费。**只有一个调用方能成功。**
+
+  上面是"先查出来、再写回去"。两个并发请求会同时读到同一条未消费的记录,
+  都比对成功,然后都往下走 —— 一个短信码就能触发两次发放。
+
+  所以消费这一步是带条件的 UPDATE(`consumed_at IS NULL`),靠数据库判胜负:
+  受影响行数是 1 的那个才算验过。这是 compare-and-set,不是先查后写。
+  """
+  def consume_code(%VerificationCode{} = record, now \\ DateTime.utc_now()) do
+    {count, _} =
+      Repo.update_all(
+        from(c in VerificationCode, where: c.id == ^record.id and is_nil(c.consumed_at)),
+        set: [consumed_at: now, updated_at: now]
+      )
+
+    # 输给了另一个并发请求 —— 对调用方来说这个码就是用过了
+    if count == 1, do: :ok, else: {:error, :invalid_code}
+  end
+
+  # 原子自增。读-改-写的话,两次并发的错误尝试会双双把 4 写成 5,
+  # 尝试次数上限就形同虚设。
+  defp bump_attempts(%VerificationCode{id: id}) do
+    Repo.update_all(from(c in VerificationCode, where: c.id == ^id), inc: [attempts: 1])
+  end
 
   # ── 注册 ────────────────────────────────────────────────────────────────
 

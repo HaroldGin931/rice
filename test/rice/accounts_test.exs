@@ -188,6 +188,42 @@ defmodule Rice.AccountsTest do
                Accounts.verify_code("sms", "86-13800000000", "register", code)
     end
 
+    # `verify_code/4` 是"先查出来、再写回去"。两个并发请求会同时读到**同一条**
+    # 未消费的记录,都比对成功 —— 一个短信码触发两次发放。
+    #
+    # 顺序调用测不出这个:第二次查的时候 consumed_at 已经写上了。要重现,
+    # 得让两个调用方各拿着一份**消费之前**的记录副本 —— 这正是并发时的样子。
+    test "两个并发请求拿着同一条记录,只有一个能消费掉" do
+      code = seed_code("sms", "86-13800000000", "register")
+
+      # 两份"陈旧"的副本,都还是 consumed_at = nil
+      a = Repo.one!(from c in VerificationCode, where: c.target == "86-13800000000")
+      b = Repo.one!(from c in VerificationCode, where: c.target == "86-13800000000")
+
+      assert is_nil(a.consumed_at) and is_nil(b.consumed_at)
+
+      results = [Accounts.consume_code(a), Accounts.consume_code(b)]
+
+      assert Enum.count(results, &(&1 == :ok)) == 1,
+             "同一个码被消费了两次: #{inspect(results)}"
+
+      assert {:error, :invalid_code} =
+               Accounts.verify_code("sms", "86-13800000000", "register", code)
+    end
+
+    # 读-改-写的话,两次并发的错误尝试会双双把 4 写成 5,上限就形同虚设
+    test "尝试次数是原子自增的" do
+      seed_code("sms", "86-13800000000", "register")
+
+      for _ <- 1..3 do
+        assert {:error, :invalid_code} =
+                 Accounts.verify_code("sms", "86-13800000000", "register", "000000")
+      end
+
+      record = Repo.one!(from c in VerificationCode, where: c.target == "86-13800000000")
+      assert record.attempts == 3
+    end
+
     # core 那边 6 位码可以无限次猜 —— 这里 5 次之后锁死
     test "尝试次数超过上限后锁死,即使之后给出正确的码" do
       code = seed_code("sms", "86-13800000000", "register")
