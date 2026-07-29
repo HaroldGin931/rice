@@ -159,8 +159,10 @@ defmodule RiceWeb.Router do
     patch "/users/:id", UserController, :update
     get "/users/:user_id/grain_transfers", GrainController, :transfers
 
-    # single / batch 合成一个 —— 收款人永远是数组
+    # single / batch 合成一个 —— 收款人永远是数组。
+    # 发放动的是钱,要管理员自己手机上的验证码 —— core 也是这个要求。
     get "/grain_grants", GrainController, :index
+    post "/grain_grants/challenge", GrainController, :challenge
     post "/grain_grants", GrainController, :create
 
     get "/proposals", ProposalController, :index

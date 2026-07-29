@@ -8,7 +8,7 @@ defmodule Rice.Accounts.VerificationCode do
   use Rice.Schema
 
   @purposes ~w(register reset_password modify_phone modify_email delete_account
-              admin_login admin_reset_password)
+              admin_login admin_reset_password admin_grant)
   @channels ~w(sms email)
   @max_attempts 5
   @validity_minutes 30

@@ -16,6 +16,7 @@ defmodule Rice.Admin do
 
   @code_purpose "admin_login"
   @reset_purpose "admin_reset_password"
+  @grant_purpose "admin_grant"
 
   # ── 身份 ────────────────────────────────────────────────────────────────
 
@@ -192,7 +193,40 @@ defmodule Rice.Admin do
     end
   end
 
-  def code_purposes, do: [@code_purpose, @reset_purpose]
+  # ── 发放稻米的二次验证 ──────────────────────────────────────────────────
+
+  @doc """
+  给当前管理员自己的手机发一个发放验证码。
+
+  发稻米是动钱的操作,core 要求管理员在发之前用短信验证码再证明一次身份
+  (`AdminUserScoreDistribution`)。令牌可能被人从浏览器里捞走,短信在管理员
+  自己手上 —— 两者同时到手才发得出去。这一层照搬过来。
+  """
+  def send_grant_code(%AdminUser{phone: phone, phone_region: region})
+      when is_binary(phone) do
+    Rice.Accounts.send_verification_code(
+      "sms",
+      Rice.Accounts.phone_target(region, phone),
+      @grant_purpose
+    )
+  end
+
+  def send_grant_code(_), do: {:error, :contact_not_set}
+
+  @doc "校验发放验证码。发给谁就验谁 —— 不能拿别人手机上的码来发。"
+  def verify_grant_code(%AdminUser{phone: phone, phone_region: region}, code)
+      when is_binary(phone) do
+    Rice.Accounts.verify_code(
+      "sms",
+      Rice.Accounts.phone_target(region, phone),
+      @grant_purpose,
+      code || ""
+    )
+  end
+
+  def verify_grant_code(_, _), do: {:error, :contact_not_set}
+
+  def code_purposes, do: [@code_purpose, @reset_purpose, @grant_purpose]
 
   # ── 内部 ────────────────────────────────────────────────────────────────
 

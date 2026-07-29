@@ -197,6 +197,7 @@ JSON 里是字符串,别用数字类型接。
 | `delete_account` | 注销账号 |
 | `admin_login` | 管理端登录(由 `/api/admin/session/challenge` 内部发起) |
 | `admin_reset_password` | 管理员重置密码 |
+| `admin_grant` | 后台发放稻米前的二次验证(由 `/api/admin/grain_grants/challenge` 发起) |
 
 约束:
 

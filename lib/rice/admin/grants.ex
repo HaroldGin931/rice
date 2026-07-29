@@ -16,6 +16,21 @@ defmodule Rice.Admin.Grants do
   alias Rice.{Pagination, Repo}
 
   @doc """
+  校验一批发放请求,但**不动账**。返回解析好的收款人。
+
+  单独拿出来是为了让调用方能在验短信码之前先把参数问题挑出来。验证码是一次性的,
+  而发放又常常是粘一列几百个手机号 —— 要是先验码再校验收款人,一个笔误就把码烧掉了,
+  还得等 60 秒重发。先校验参数(不写任何东西),码留到真要动账的时候再验。
+  """
+  def prepare(recipients, amount)
+
+  def prepare(recipients, amount) when is_list(recipients) and recipients != [] do
+    with :ok <- validate_amount(amount), do: resolve_all(recipients)
+  end
+
+  def prepare(_, _), do: {:error, :no_recipients}
+
+  @doc """
   批量发放。`recipients` 是手机号 / 邮箱 / handle / DID / rice id 的数组。
 
   一个事务:要么每个人都到账,要么一个都不动。
@@ -23,37 +38,41 @@ defmodule Rice.Admin.Grants do
   def grant(recipients, amount, opts \\ [])
 
   def grant(recipients, amount, opts) when is_list(recipients) and recipients != [] do
-    with :ok <- validate_amount(amount),
-         {:ok, users} <- resolve_all(recipients) do
-      memo = Keyword.get(opts, :memo, "") || ""
-
-      users
-      |> Enum.reduce(Ecto.Multi.new(), fn user, multi ->
-        changeset =
-          Transfer.changeset(%Transfer{}, %{
-            kind: "grant",
-            to_user_id: user.id,
-            amount: amount,
-            memo: memo
-          })
-
-        multi
-        |> Ecto.Multi.insert({:transfer, user.id}, changeset)
-        |> Ecto.Multi.update_all(
-          {:credit, user.id},
-          from(u in User, where: u.id == ^user.id),
-          inc: [grain_balance: amount]
-        )
-      end)
-      |> Repo.transaction()
-      |> case do
-        {:ok, _} -> {:ok, length(users)}
-        {:error, _step, reason, _} -> {:error, reason}
-      end
+    with {:ok, users} <- prepare(recipients, amount) do
+      credit(users, amount, opts)
     end
   end
 
   def grant(_, _, _), do: {:error, :no_recipients}
+
+  @doc "把 `prepare/2` 解析出来的收款人真正入账。"
+  def credit(users, amount, opts \\ []) do
+    memo = Keyword.get(opts, :memo, "") || ""
+
+    users
+    |> Enum.reduce(Ecto.Multi.new(), fn user, multi ->
+      changeset =
+        Transfer.changeset(%Transfer{}, %{
+          kind: "grant",
+          to_user_id: user.id,
+          amount: amount,
+          memo: memo
+        })
+
+      multi
+      |> Ecto.Multi.insert({:transfer, user.id}, changeset)
+      |> Ecto.Multi.update_all(
+        {:credit, user.id},
+        from(u in User, where: u.id == ^user.id),
+        inc: [grain_balance: amount]
+      )
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, _} -> {:ok, length(users)}
+      {:error, _step, reason, _} -> {:error, reason}
+    end
+  end
 
   defp validate_amount(amount) when is_integer(amount) and amount > 0, do: :ok
   defp validate_amount(_), do: {:error, :invalid_amount}
