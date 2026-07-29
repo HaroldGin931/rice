@@ -10,15 +10,15 @@ config :rice, Rice.Repo,
   show_sensitive_data_on_connection_error: true,
   pool_size: 10
 
-# 本地跑的前端:social-app 的 Expo web(8081)和管理端的 vite(5173)。
-# 管理端其实是走 vite 代理的同源请求,列在这里是为了直连时也能用。
-config :rice, :cors,
-  origins: [
-    "http://localhost:8081",
-    "http://127.0.0.1:8081",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173"
-  ]
+# 开发环境:放行本机任意端口。
+#
+# 不写死端口是有原因的 —— social-app 的 web 版由 webpack 服务在 19006,
+# 而 Expo 自己的 dev server 在 8081,日志里两个端口都会出现;端口被占时
+# 还会自动换一个。写死一串端口的结果是:页面能打开、请求全被浏览器拦掉、
+# 界面只是一片空白,没有任何报错指向 CORS。
+#
+# 只在 dev 这么松。生产走 CORS_ORIGINS 白名单,见 config/runtime.exs。
+config :rice, :cors, origins: [~r{^http://(localhost|127\.0\.0\.1)(:\d+)?$}]
 
 # For development, we disable any cache and enable
 # debugging and code reloading.

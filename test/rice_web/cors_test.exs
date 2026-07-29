@@ -68,6 +68,22 @@ defmodule RiceWeb.CorsTest do
     assert length(get_resp_header(conn, "access-control-allow-origin")) <= 1
   end
 
+  # 开发环境用正则放行本机任意端口。写死端口的结果是:换个端口起前端,
+  # 页面能打开、请求全被拦、界面一片空白,而且没有任何报错指向 CORS。
+  test "白名单支持正则,不是只能写死字符串" do
+    origins = Application.get_env(:rice, :cors)[:origins]
+    Application.put_env(:rice, :cors, origins: [~r{^http://localhost(:\d+)?$}])
+    on_exit(fn -> Application.put_env(:rice, :cors, origins: origins) end)
+
+    for origin <- ["http://localhost:19006", "http://localhost:8081", "http://localhost"] do
+      conn = build_conn() |> put_req_header("origin", origin) |> get(~p"/api/apps")
+      assert get_resp_header(conn, "access-control-allow-origin") == [origin], origin
+    end
+
+    blocked = build_conn() |> put_req_header("origin", "http://evil.test") |> get(~p"/api/apps")
+    refute get_resp_header(blocked, "access-control-allow-origin") == ["http://evil.test"]
+  end
+
   describe "白名单解析" do
     test "逗号分隔,空格和空项都丢掉" do
       assert Rice.Cors.parse("https://a.com, https://b.com ,") ==
