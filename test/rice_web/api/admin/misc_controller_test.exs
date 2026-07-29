@@ -97,4 +97,46 @@ defmodule RiceWeb.Api.Admin.MiscControllerTest do
              |> json_response(401)
     end
   end
+
+  @doc false
+  # 后台的每一个列表都是页码式的(前端 13 个表格都走 ProTable)。
+  # 逐个扫一遍:单元测试用的是最普通的查询,而真正会出问题的是那些带
+  # group_by / join 的 —— 勋章列表就因为 group_by 在页码模式下 500 过。
+  describe "每个后台列表在页码模式下都得能开" do
+    setup %{conn: conn} do
+      {admin, token} = admin_with_token()
+      user = user_fixture()
+      badge = badge_fixture()
+      {:ok, _} = Rice.Community.award_badge(badge, user)
+      {:ok, _} = Rice.Grains.grant(user, 10)
+      proposal_fixture(user)
+
+      %{conn: conn, token: token, admin: admin, user: user, badge: badge}
+    end
+
+    test "每一条都返回 200 且带 total", ctx do
+      %{conn: conn, token: token, user: user, badge: badge} = ctx
+
+      paths = [
+        ~p"/api/admin/users?page=1&per_page=5",
+        ~p"/api/admin/admin_users?page=1&per_page=5",
+        ~p"/api/admin/proposals?page=1&per_page=5",
+        ~p"/api/admin/badges?page=1&per_page=5",
+        ~p"/api/admin/grain_grants?page=1&per_page=5",
+        ~p"/api/admin/badges/#{badge.id}/holders?page=1&per_page=5",
+        ~p"/api/admin/users/#{user.id}/grain_transfers?page=1&per_page=5"
+      ]
+
+      for path <- paths do
+        assert %{"data" => data, "meta" => meta} =
+                 build_conn() |> authed(token) |> get(path) |> json_response(200)
+
+        assert is_list(data), "#{path} 没返回列表"
+        assert is_integer(meta["total"]), "#{path} 的 meta 里没有 total"
+        assert meta["page"] == 1
+      end
+
+      assert conn
+    end
+  end
 end

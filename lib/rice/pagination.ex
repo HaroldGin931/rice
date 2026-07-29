@@ -74,7 +74,7 @@ defmodule Rice.Pagination do
 
     # COUNT 和取数据是两条查询,不在一个事务里 —— 中间插进来一行,
     # total 会比实际多/少一条。后台表格能接受这个,加个事务不值当。
-    total = repo.aggregate(exclude(query, :preload), :count)
+    total = count(query, repo)
 
     entries =
       query
@@ -111,6 +111,30 @@ defmodule Rice.Pagination do
 
   defp last_id([]), do: nil
   defp last_id(entries), do: entries |> List.last() |> Map.fetch!(:id)
+
+  @doc false
+  # 数一共多少条。看着比 `Repo.aggregate(query, :count)` 啰嗦,两处都是必要的:
+  #
+  #   * `exclude(:group_by)` —— Ecto 的 aggregate 遇到 group_by 直接抛
+  #     `Ecto.QueryError`。勋章列表正是这样一个查询(左连 awards 数持有人),
+  #     所以它在页码模式下会 500。
+  #   * `count(distinct)` —— 去掉 group_by 之后,一枚有 3 个持有人的勋章会变成
+  #     3 行。不去重的话 total 数的是连接后的行数,不是勋章数。
+  #
+  # select/order_by/limit/offset 也一并去掉:它们对计数没有意义,
+  # 而带着 select 的话计数会去算那个表达式。
+  defp count(query, repo) do
+    query
+    |> exclude(:preload)
+    |> exclude(:select)
+    |> exclude(:group_by)
+    |> exclude(:order_by)
+    |> exclude(:distinct)
+    |> exclude(:limit)
+    |> exclude(:offset)
+    |> select([q], count(q.id, :distinct))
+    |> repo.one()
+  end
 
   defp apply_cursor(query, %{before: nil, after: nil}, _order), do: query
 

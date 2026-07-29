@@ -105,6 +105,43 @@ defmodule Rice.PaginationTest do
       assert page.total == 3
     end
 
+    # Ecto 的 aggregate 遇到 group_by 直接抛 —— 勋章列表就是这样一个查询,
+    # 它在页码模式下会 500
+    test "带 group_by 的查询也能数出 total" do
+      for _ <- 1..3, do: badge_fixture()
+
+      q =
+        from(b in Rice.Community.Badge,
+          left_join: a in assoc(b, :awards),
+          group_by: b.id,
+          select: %{b | holder_count: count(a.id)}
+        )
+
+      page = Pagination.paginate(q, Repo, Pagination.params(%{"page" => "1", "per_page" => "2"}))
+
+      assert length(page.entries) == 2
+      assert page.total == 3
+    end
+
+    # 去掉 group_by 之后,一枚有 3 个持有人的勋章会变成 3 行。
+    # 不去重的话 total 数的是连接后的行数,不是勋章数。
+    test "连接出重复行时 total 数的是主表的行数" do
+      badge = badge_fixture()
+      for _ <- 1..3, do: {:ok, _} = Rice.Community.award_badge(badge, user_fixture())
+      badge_fixture()
+
+      q =
+        from(b in Rice.Community.Badge,
+          left_join: a in assoc(b, :awards),
+          group_by: b.id,
+          select: %{b | holder_count: count(a.id)}
+        )
+
+      page = Pagination.paginate(q, Repo, Pagination.params(%{"page" => "1", "per_page" => "10"}))
+
+      assert page.total == 2
+    end
+
     test "一条都没有时 total 是 0" do
       page = Pagination.paginate(query(), Repo, Pagination.params(%{"page" => "1"}))
 
