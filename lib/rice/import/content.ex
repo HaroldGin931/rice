@@ -4,8 +4,11 @@ defmodule Rice.Import.Content do
 
   每张表都按 `legacy_id` 幂等 —— 反复跑只会补新增的行,支持"提前预导 → 切换日
   只跑增量"。外键通过 `attachments.legacy_id` 解析,解析不到的记为警告而不是静默跳过。
+
+  事务和 dry-run 的回滚在 `Rice.Import` 里,这里只管映射。
   """
   import Ecto.Query
+  import Rice.Import.Writer, only: [insert_each: 3]
 
   alias Rice.Content.{Announcement, App, Banner}
   alias Rice.Files.Attachment
@@ -13,33 +16,15 @@ defmodule Rice.Import.Content do
   alias Rice.Repo
   alias Rice.Settings.{Document, Site}
 
-  @doc """
-  跑一遍导入。`commit?` 为 false 时全部在一个会回滚的事务里执行 ——
-  能得到真实的行数和冲突数,但什么都不留下。
-  """
-  def run(commit?) do
-    fun = fn ->
-      report = %{
-        attachments: import_attachments(),
-        apps: import_apps(),
-        banners: import_banners(),
-        announcements: import_announcements(),
-        site_settings: import_site_settings()
-      }
-
-      # 对账必须在事务**内**算 —— dry-run 会回滚,回滚之后再数就全是 0,
-      # 会得出"一条都没导进去"的错误结论。
-      result = %{report: report, reconciliation: reconcile()}
-
-      unless commit?, do: Repo.rollback({:dry_run, result})
-      result
-    end
-
-    case Repo.transaction(fun, timeout: :timer.minutes(30)) do
-      {:ok, result} -> {:ok, result}
-      {:error, {:dry_run, result}} -> {:ok, result}
-      {:error, reason} -> {:error, reason}
-    end
+  @doc "跑这几张表的导入,返回每张表的 `%{inserted:, skipped:, warnings:}`。"
+  def import_all do
+    %{
+      attachments: import_attachments(),
+      apps: import_apps(),
+      banners: import_banners(),
+      announcements: import_announcements(),
+      site_settings: import_site_settings()
+    }
   end
 
   @doc """
@@ -61,7 +46,8 @@ defmodule Rice.Import.Content do
   # ── 附件 ────────────────────────────────────────────────────────────────
 
   # core 没有附件表,fileId 散落在 t_app.logo / t_banner.banner_file_id /
-  # t_information.attach_id / t_global_config.foundation_public_document 里。
+  # t_information.attach_id / t_global_config.foundation_public_document /
+  # t_admin_user.avatar 里。
   # 先把它们收集去重,建出 attachments 行;文件本体的搬运是期 2。
   defp import_attachments do
     file_ids =
@@ -69,6 +55,9 @@ defmodule Rice.Import.Content do
         Source.query!("SELECT logo AS f FROM t_app WHERE deleted = 0"),
         Source.query!("SELECT banner_file_id AS f FROM t_banner WHERE deleted = 0"),
         Source.query!("SELECT attach_id AS f FROM t_information WHERE deleted = 0"),
+        # 管理员头像。漏了这一行,导进来的管理员头像会全部变成 null ——
+        # 而这在对账数字上完全看不出来
+        Source.query!("SELECT avatar AS f FROM t_admin_user WHERE deleted = 0"),
         foundation_document_ids()
       ]
       |> List.flatten()
@@ -218,32 +207,5 @@ defmodule Rice.Import.Content do
 
   defp attachment_id(file_id) do
     Repo.one(from a in Attachment, where: a.legacy_id == ^file_id, select: a.id)
-  end
-
-  # `on_conflict: :nothing` 让重复跑是安全的,但**它不能告诉你有没有真的插进去**:
-  # Ecto 只在主键由数据库生成时才会把未插入的行的 id 置为 nil,而我们的 TSID 是
-  # 应用侧生成的,所以返回的结构里 id 永远有值。一开始靠 `%{id: nil}` 判断,
-  # 结果第二次跑仍然报"新增 21",而对账显示行数没变 —— 报告在说谎。
-  #
-  # 改成插入前后各数一次:差值就是真实新增数,精确且与 Ecto 的实现细节无关。
-  defp insert_each(rows, schema, build) do
-    before_count = Repo.aggregate(schema, :count)
-
-    acc =
-      Enum.reduce(rows, %{attempted: 0, warnings: []}, fn row, acc ->
-        case build.(row) do
-          {:skip, warning} ->
-            %{acc | warnings: acc.warnings ++ [warning]}
-
-          {:ok, changeset} ->
-            case Repo.insert(changeset, on_conflict: :nothing) do
-              {:ok, _} -> %{acc | attempted: acc.attempted + 1}
-              {:error, cs} -> %{acc | warnings: acc.warnings ++ [inspect(cs.errors)]}
-            end
-        end
-      end)
-
-    inserted = Repo.aggregate(schema, :count) - before_count
-    %{inserted: inserted, skipped: length(rows) - inserted, warnings: acc.warnings}
   end
 end

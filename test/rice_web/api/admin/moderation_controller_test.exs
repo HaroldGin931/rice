@@ -231,6 +231,133 @@ defmodule RiceWeb.Api.Admin.ModerationControllerTest do
     end
   end
 
+  # core 没有这个入口:medal/create 建和发一次做完,建完就加不了人。
+  # 漏一个人只能重建一枚同名勋章,先拿到的人的获得时间也跟着变。
+  describe "给已有勋章补发持有人" do
+    test "补进去的人出现在持有人列表里", %{conn: conn, token: token} do
+      badge = badge_fixture()
+      old = user_fixture(%{nickname: "先拿到的"})
+      {:ok, _} = Rice.Community.award_badge(badge, old)
+      late = user_fixture(%{phone: "13800001111", phone_region: "86"})
+
+      assert %{"data" => %{"awarded" => 1, "already_held" => 0}} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/badges/#{badge.id}/holders", %{to: ["13800001111"]})
+               |> json_response(201)
+
+      assert %{"data" => holders} =
+               build_conn()
+               |> authed(token)
+               |> get(~p"/api/admin/badges/#{badge.id}/holders")
+               |> json_response(200)
+
+      assert Enum.map(holders, & &1["id"]) |> Enum.sort() == Enum.sort([old.id, late.id])
+    end
+
+    # 补名单时运营粘的常常是完整名单而不是差集 —— 重叠报错的话这接口没法用
+    test "已经持有的人不算错,也不会重复发", %{conn: conn, token: token} do
+      badge = badge_fixture()
+      held = user_fixture(%{phone: "13800002222", phone_region: "86"})
+      {:ok, first} = Rice.Community.award_badge(badge, held)
+      fresh = user_fixture(%{handle: "fresh.web5.xjdao.test"})
+
+      assert %{"data" => %{"awarded" => 1, "already_held" => 1}} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/badges/#{badge.id}/holders", %{
+                 to: ["13800002222", "fresh.web5.xjdao.test"]
+               })
+               |> json_response(201)
+
+      assert Rice.Community.badge_holder_count(badge) == 2
+      assert Rice.Repo.get_by!(Rice.Community.BadgeAward, badge_id: badge.id, user_id: fresh.id)
+
+      # 先拿到的人的获得时间不能被这次补发改掉 —— 重建一枚同名勋章的老办法
+      # 正是会毁掉这个时间,补发接口存在的意义有一半在这里
+      assert Rice.Repo.reload!(first).awarded_at == first.awarded_at
+    end
+
+    test "名单里有人认不出来,一个都不发", %{conn: conn, token: token} do
+      badge = badge_fixture()
+      user_fixture(%{phone: "13800003333", phone_region: "86"})
+
+      assert %{"errors" => %{"to" => [message]}} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/badges/#{badge.id}/holders", %{
+                 to: ["13800003333", "查无此人@example.com"]
+               })
+               |> json_response(422)
+
+      assert message =~ "查无此人@example.com"
+      assert Rice.Community.badge_holder_count(badge) == 0
+    end
+
+    test "名单里不是字符串时 422 而不是 500", %{conn: conn, token: token} do
+      badge = badge_fixture()
+
+      assert %{"errors" => %{"to" => [_]}} =
+               conn
+               |> authed(token)
+               |> post(~p"/api/admin/badges/#{badge.id}/holders", %{to: [nil, 123]})
+               |> json_response(422)
+    end
+
+    # 空名单在新建时是合法的(建一枚空勋章),在这里不是 ——
+    # 补发一个空名单是个笔误,不该静悄悄地返回成功
+    test "空名单 422", %{token: token} do
+      badge = badge_fixture()
+
+      for body <- [%{}, %{to: []}, %{to: ["", "  "]}] do
+        assert %{"errors" => %{"to" => ["名单不能为空"]}} =
+                 build_conn()
+                 |> authed(token)
+                 |> post(~p"/api/admin/badges/#{badge.id}/holders", body)
+                 |> json_response(422)
+      end
+    end
+
+    test "勋章不存在 404", %{conn: conn, token: token} do
+      assert conn
+             |> authed(token)
+             |> post(~p"/api/admin/badges/3ke6kg3wk223e/holders", %{to: ["a"]})
+             |> json_response(404)
+    end
+
+    test "未认证 401", %{conn: conn} do
+      badge = badge_fixture()
+
+      assert conn
+             |> post(~p"/api/admin/badges/#{badge.id}/holders", %{to: ["a"]})
+             |> json_response(401)
+    end
+
+    # C 端令牌调不了管理端 —— 两套令牌互相换不过去
+    test "C 端令牌 401", %{conn: conn} do
+      badge = badge_fixture()
+      {_user, token} = user_with_token()
+
+      assert conn
+             |> authed(token)
+             |> post(~p"/api/admin/badges/#{badge.id}/holders", %{to: ["a"]})
+             |> json_response(401)
+    end
+
+    # 发勋章是内容运营,不是管理员管理 —— operator 应该能做
+    test "运营也能补发", %{conn: _conn} do
+      badge = badge_fixture()
+      user = user_fixture(%{handle: "op-target.web5.xjdao.test"})
+      {_admin, token} = admin_with_token(%{role: "operator"})
+
+      assert %{"data" => %{"awarded" => 1}} =
+               build_conn()
+               |> authed(token)
+               |> post(~p"/api/admin/badges/#{badge.id}/holders", %{to: [user.handle]})
+               |> json_response(201)
+    end
+  end
+
   # 后台的提案列表有个「发布时间」范围搜索。core 有这个筛选,
   # 迁过来时前端还在发 since/until,而服务端不认 —— 表现是筛了等于没筛。
   describe "提案按发布时间筛" do

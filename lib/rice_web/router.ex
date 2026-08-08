@@ -173,6 +173,8 @@ defmodule RiceWeb.Router do
     get "/badges", BadgeController, :index
     post "/badges", BadgeController, :create
     get "/badges/:badge_id/holders", BadgeController, :holders
+    # 给已有勋章补发持有人。core 没有这个入口 —— 建完就加不了人
+    post "/badges/:badge_id/holders", BadgeController, :award
 
     # core 的 detail + modify-foundation-info + modify-proposal-config
     get "/settings", SettingsController, :show

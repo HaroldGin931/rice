@@ -116,6 +116,55 @@ defmodule Rice.Community do
     end
   end
 
+  @doc """
+  给一枚**已有**的勋章补发持有人。
+
+  core 没有这个入口:`medal/create` 建和发一次做完,建完就加不了人。漏了一个人
+  只能重建一枚同名勋章,而那会把先拿到的人的获得时间也一起改掉。
+
+  收款人的写法和 `create_badge/2` 完全一致,认不出来的人同样是**全有或全无**。
+  不一样的只有一条:**已经持有的人不算错**。补名单的场景里运营粘的往往是完整
+  名单而不是差集,重叠是常态而不是笔误 —— 报错的话这个接口就没法用了。
+
+  返回 `%{awarded: 真正新发出去的人数, already_held: 名单里已经有的人数}`。
+
+  写入是一条带 `on_conflict: :nothing` 的 `INSERT`,所以"已持有"和"两个运营
+  同时点了提交"走的是同一条路 —— 数据库的唯一索引说了算,不靠先查后写那个
+  会漏的窗口。
+  """
+  def award_badge_to(%Badge{} = badge, recipients) do
+    with {:ok, users} <- resolve_recipients(recipients) do
+      case users do
+        [] -> {:error, :no_recipients}
+        users -> insert_awards(badge, users)
+      end
+    end
+  end
+
+  defp insert_awards(%Badge{id: badge_id}, users) do
+    now = DateTime.utc_now()
+
+    entries =
+      Enum.map(users, fn user ->
+        %{
+          id: Rice.Tsid.generate(),
+          badge_id: badge_id,
+          user_id: user.id,
+          awarded_at: now,
+          inserted_at: now,
+          updated_at: now
+        }
+      end)
+
+    {awarded, _} =
+      Repo.insert_all(BadgeAward, entries,
+        on_conflict: :nothing,
+        conflict_target: [:badge_id, :user_id]
+      )
+
+    {:ok, %{awarded: awarded, already_held: length(users) - awarded}}
+  end
+
   defp award_all(multi, users) do
     Enum.reduce(users, multi, fn user, acc ->
       Ecto.Multi.insert(acc, {:award, user.id}, fn %{badge: badge} ->

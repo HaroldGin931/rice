@@ -1,10 +1,11 @@
 # 把 xiangjiandao-core 的后端能力迁移到 rice —— 调研与方案
 
-> 状态:**C 端(36 个接口)与管理端(56 个接口)的后端全部完成**,social-app 的
-> 调用点也已全部切到 rice(进度见 §9)。rice 411 个测试全绿;social-app 分支
-> `rice-backend` 相对 master 零新增类型错误。剩 `social-app-admin` 前端未切。
-> 全部在本地库开发验证,**生产环境未接触,未做任何数据迁移**。
-> 全部在本地库开发验证,**生产环境未接触,未做任何数据迁移**。
+> 状态:**C 端(36 个接口)与管理端(56 个接口)的后端全部完成**,两个前端
+> (`social-app`、`social-app-admin`)的调用点也已全部切到 rice(进度见 §9)。
+> rice 504 个测试全绿;social-app 分支 `rice-backend` 相对 master 零新增类型错误。
+>
+> **剩下的是数据**:`mix rice.import` 只覆盖 6 张表,`users` 及其下游一张都没写
+> (见 §6.2)。全部在本地库开发验证,**生产环境未接触,未做任何数据迁移**。
 > 目标:用 Phoenix(rice)替换 .NET 的 `xiangjiandao-core`,顺便把跟着 DDD/EF 脚手架长出来的
 > 数据模型和 RPC 风格 API 重做成 Rails/Phoenix 惯例的样子。
 > 日期:2026-07-27
@@ -559,7 +560,7 @@ Oban 的 `Oban.Plugins.Cron` 一行 `{"* * * * *", Rice.Workers.CloseProposals}`
 | `POST /user/login` | `POST /api/session` |
 | `POST /user/login-user-detail` | `GET /api/users/me` |
 | `POST /user/edit-profile` | `PATCH /api/users/me` |
-| `POST /user/reset-password` | `PUT /api/users/me/password` |
+| `POST /user/reset-password` | `POST /api/passwords/reset`(匿名 + 验证码,和 core 一样) |
 | `POST /user/modify-phone` | `PUT /api/users/me/phone` |
 | `POST /user/modify-email-address` | `PUT /api/users/me/email` |
 | `POST /user/delete` | `DELETE /api/users/me` |
@@ -622,6 +623,15 @@ rice 已经有到 core MySQL 的连接(`Rice.DaoSql`),直接复用,写一个 `mi
 - 外键靠 `join` 老 `legacy_id` 解析。
 - `--dry-run` 输出每表行数与冲突数。
 - 结束打一份对账:两库行数、稻米总额、投票数。
+
+**实际进度(2026-08-08):只有 6 张表**。已覆盖 `attachments`(元数据)、`apps`、
+`banners`、`announcements`、`site_settings`、`admin_users`。
+
+**`users` 及其下游一张都没写** —— `nodes`、`badges`、`badge_awards`、
+`grain_transfers`、`proposals`、`proposal_votes`、`proposal_comments`。
+接口和 schema 都齐了,搬数据的那一半还是空的:现在跑一次导入,得到的是一个
+有内容位、有管理员、**一个用户都没有**的库。§7.3 的对账项(稻米守恒、票数、
+抽样比对)也因此一条都还没实现 —— 那些断言全落在没写的表上。
 
 ### 6.3 期 3 的三个真实风险
 
@@ -1154,9 +1164,47 @@ rice 用 `:crypto.strong_rand_bytes/1`。老密码照样验得过,验证不关�
 
 #### 还没做
 
-- `social-app-admin` 前端还没切过来(这一轮只做了 rice 侧)。切的时候要注意:
-  core 的管理端把**裸令牌**直接塞进 `Authorization` 头,rice 只认 `Bearer <token>`。
-- 管理员账号的数据迁移(`mix rice.import` 还没加 `admin_users` 这张表)。
+- ~~`social-app-admin` 前端还没切过来~~ —— **已于 2026-07-29 切完**(分支
+  `rice-backend`,11 个提交,core 客户端已删)。见下。
+- ~~管理员账号的数据迁移~~ —— **已于 2026-08-08 补上**,见下。
+
+### 补上的两处(2026-08-08,rice 分支 `backend-migration`)
+
+**① `mix rice.import` 有 `admin_users` 了。**
+`lib/rice/import/admin_users.ex`。这张表非导不可,原因不是省事:密码摘要能
+**原样搬**(两边都是 PBKDF2-HMAC-SHA256 / 27500 轮 / 64 字节 / Base64),
+让运营重建账号等于所有管理员一起换密码,而管理端没有自助改密的入口。
+
+两类行会被**跳过并留下警告**,不静默丢:
+
+| 跳过 | 为什么 |
+|---|---|
+| `phone = ''` | rice 的登录和找回密码只认手机号,这种账号存得进去也登不进来;库上还有 `admin_users_phone_check` 拦着 |
+| `role = 0` | core 的 `RoleType.Unknown`,没初始化的脏值。默认成 operator 等于凭空发一份后台权限 |
+
+对账的分母是"**打算导入的**行"(`deleted = 0 AND phone <> '' AND role IN (1,2)`)
+而不是全部存活行 —— 否则库里只要有一个没手机号的旧账号,对账就永远是 ❌,
+看的人很快会学会忽略它。
+
+顺带修了一处:`t_admin_user.avatar` 原先不在附件收集的四个来源里,
+导进来的管理员头像会全部变成 null,而这在行数上完全看不出来。
+
+`secret_data` 的键名大小写(`Value`/`value`)两种都认。认错的表现是**所有管理员
+都登不进去**,而导入这边行数对得上、一条警告都没有;盐不是合法 Base64 的行
+也拦下来 —— `valid_password?/2` 会把 `:crypto` 的 `ArgumentError` rescue 成
+"密码不对",那种坏行只有当事人登录时才暴露。
+
+结构上顺手拆了一下:事务和 dry-run 回滚挪到 `Rice.Import`,
+插入+计数挪到 `Rice.Import.Writer`,`Content` 只管映射。
+
+**② `POST /api/admin/badges/:badge_id/holders` —— 给已有勋章补发持有人。**
+core 没有这个入口,漏了谁只能重建一枚同名勋章,而那会把先拿到的人的获得时间
+一起改掉。语义和新建时的名单一致(认不出来的人整批不发),只有一处放宽:
+**已经持有的人不算错**,补名单时运营粘的常常是完整名单而不是差集。
+
+写入是一条带 `ON CONFLICT DO NOTHING` 的 `INSERT`,所以"已持有"和"两个运营
+同时点提交"走的是同一条路 —— 唯一索引说了算,不靠先查后写那个会漏的窗口。
+返回 `{awarded, already_held}`。文档见 `docs/api/admin/badge_controller.md`。
 
 ### 期 0–5 剩余
 

@@ -11,12 +11,27 @@ defmodule Mix.Tasks.Rice.Import do
 
     * 不加 `--commit` 时,整个导入跑在一个必定回滚的事务里 —— 能拿到真实的
       行数和冲突数,但什么都不留下。
-    * 加了 `--commit` 时,会先检查目标 Postgres 是否是生产库;是的话必须再加
-      `--i-know-this-is-production` 才继续。
+    * 加了 `--commit` 时,目标库名**必须**以 `_dev` / `_test` / `_staging` 结尾,
+      否则要显式加 `--i-know-this-is-production`。见下。
     * 按 `legacy_id` 幂等,可以反复跑;支持"提前预导 → 切换日只跑增量"。
 
-  期 1 覆盖:attachments(元数据)/ apps / banners / announcements / site_settings。
-  文件本体的搬运、users 及其下游是后面几期的事。
+  ## 目标库为什么用白名单而不是黑名单
+
+  原来的判定是黑名单:URL 里出现 `node.xjdao.xyz`,或者含 `prod` 且不含
+  `localhost`。**在服务器上跑的时候这条形同虚设** —— 生产和测试共用同一个
+  Postgres 实例,测试库是 `…@127.0.0.1:5432/rice_dev`,生产库是同一实例上的
+  `…/rice`。两者 host 都是 `127.0.0.1`,`rice` 也不含 `prod`,黑名单一个都不触发。
+  库名少写四个字符就能把生产库当成导入目标,而安全阀一声不吭。
+
+  白名单反过来:默认**只认摆明是测试库的名字**,其余一律拦下来。判断错的方向
+  从"放过生产库"变成"多问一次测试库",这是这两种错误里代价小的那个。
+
+  已覆盖:attachments(元数据)/ apps / banners / announcements / site_settings /
+  admin_users。文件本体的搬运见 `mix rice.backfill_attachments`。
+
+  **还没覆盖:users 及其下游**(nodes / badges / badge_awards / grain_transfers /
+  proposals / proposal_votes / proposal_comments)—— 见
+  `docs/backend-migration-plan.md` §6。
   """
   use Mix.Task
 
@@ -38,7 +53,7 @@ defmodule Mix.Tasks.Rice.Import do
     source = opts[:source] || Mix.raise("必须提供 --source mysql://user:pass@host:port/db")
     commit? = opts[:commit] || false
 
-    if commit?, do: guard_production!(opts)
+    if commit?, do: guard_target!(opts)
 
     {:ok, _pid} = Rice.Import.Source.start_link(source)
 
@@ -46,7 +61,7 @@ defmodule Mix.Tasks.Rice.Import do
     Mix.shell().info("源:  #{redact(source)}")
     Mix.shell().info("目标:#{redact(target_url())}\n")
 
-    case Rice.Import.Content.run(commit?) do
+    case Rice.Import.run(commit?) do
       {:ok, %{report: report, reconciliation: reconciliation}} ->
         print_report(report)
         print_reconciliation(reconciliation)
@@ -60,24 +75,29 @@ defmodule Mix.Tasks.Rice.Import do
   defp mode_banner(true), do: "== 导入(--commit,会写入)=="
   defp mode_banner(false), do: "== 导入(dry-run,不写入)=="
 
-  # 生产库的判定故意保守:主机名或库名里出现这些字样就算。宁可多问一次。
-  defp guard_production!(opts) do
-    url = target_url()
-    production? = String.contains?(url, "node.xjdao.xyz") or looks_like_prod?(url)
+  defp guard_target!(opts) do
+    database = Rice.Import.target_database()
 
-    if production? and not opts[:i_know_this_is_production] do
-      Mix.raise("""
-      目标看起来是生产库:#{redact(url)}
+    cond do
+      Rice.Import.dev_database?(database) ->
+        :ok
 
-      按 docs/backend-migration-plan.md §7.0,生产导入需要单独确认。
-      确实要写生产,请显式加上 --i-know-this-is-production。
-      """)
+      opts[:i_know_this_is_production] ->
+        Mix.shell().info("⚠️  目标库 `#{database}` 不是测试库,已被 --i-know-this-is-production 放行。\n")
+
+      true ->
+        Mix.raise("""
+        目标库是 `#{database}`,不在测试库白名单里(要以 #{Enum.join(Rice.Import.dev_suffixes(), " / ")} 结尾)。
+
+        目标:#{redact(target_url())}
+
+        生产和测试共用同一个 Postgres 实例,`rice` 和 `rice_dev` 只差四个字符 ——
+        所以这里不猜,只认摆明是测试库的名字。
+
+        按 docs/backend-migration-plan.md §7.0,写非测试库需要单独确认。
+        确实要写,请显式加上 --i-know-this-is-production。
+        """)
     end
-  end
-
-  defp looks_like_prod?(url) do
-    host_and_db = String.downcase(url)
-    String.contains?(host_and_db, "prod") and not String.contains?(host_and_db, "localhost")
   end
 
   defp target_url do
@@ -92,7 +112,7 @@ defmodule Mix.Tasks.Rice.Import do
       String.pad_trailing("表", 20) <> String.pad_leading("新增", 8) <> String.pad_leading("已存在", 10)
     )
 
-    for key <- [:attachments, :apps, :banners, :announcements, :site_settings] do
+    for key <- Rice.Import.order() do
       %{inserted: inserted, skipped: skipped} = report[key]
 
       Mix.shell().info(
