@@ -48,22 +48,28 @@ defmodule Rice.Import.Content do
   # core 没有附件表,fileId 散落在七处。漏掉任何一处的表现都一样:
   # 那一列的图片在 rice 里变成 null,而**行数对账完全看不出来**。
   # 先把它们收集去重,建出 attachments 行;文件本体的搬运是期 2。
+  # 第三个元素是取哪些行。**必须和那张表实际导入的范围一致** ——
+  # `t_proposal` 连软删一起导(它的软删行有投票和评论引用),所以收集也不能
+  # 加 `deleted = 0`。第一版加了,结果 8 条软删提案的附件没被收进来,
+  # 它们的 `attachment_id` 全是 null,而**每一项行数对账都是绿的**:
+  # 提案 21 对 21,附件 78 对 78,少的是"关联"而不是"行"。
   @file_id_sources [
-    {"t_app", "logo"},
-    {"t_banner", "banner_file_id"},
-    {"t_information", "attach_id"},
-    {"t_admin_user", "avatar"},
-    {"t_node", "logo"},
-    {"t_medal", "attach_id"},
-    {"t_proposal", "attach_id"}
+    {"t_app", "logo", "deleted = 0"},
+    {"t_banner", "banner_file_id", "deleted = 0"},
+    {"t_information", "attach_id", "deleted = 0"},
+    {"t_admin_user", "avatar", "deleted = 0"},
+    {"t_node", "logo", "deleted = 0"},
+    {"t_medal", "attach_id", "deleted = 0"},
+    {"t_proposal", "attach_id", "1 = 1"}
     # t_user_medal.attach_id 和 t_proposal.initiator_avatar 不收 —— 前者是
-    # t_medal.attach_id 的副本,后者是 t_user.avatar 的副本
+    # t_medal.attach_id 的副本,后者是 t_user.avatar 的副本。
+    # t_user.avatar 在下面单独一路,因为它混着 PDS 的 blob URL。
   ]
 
   defp import_attachments do
     file_ids =
-      (Enum.map(@file_id_sources, fn {table, column} ->
-         Source.query!("SELECT `#{column}` AS f FROM `#{table}` WHERE deleted = 0")
+      (Enum.map(@file_id_sources, fn {table, column, filter} ->
+         Source.query!("SELECT `#{column}` AS f FROM `#{table}` WHERE #{filter}")
        end) ++ [foundation_document_ids()])
       |> List.flatten()
       |> Enum.map(&extract_file_id/1)

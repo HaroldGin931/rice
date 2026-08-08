@@ -146,6 +146,16 @@ defmodule Rice.ImportTest do
       refute Repo.get_by!(Proposal, legacy_id: "pr1").deleted_at
     end
 
+    # 提案连软删一起导,附件的收集却曾经带着 `deleted = 0` —— 两个范围一错位,
+    # 软删提案的 attachment_id 就全是 null,而**每一项行数对账都是绿的**:
+    # 提案数对、附件数也对,少的是"关联"不是"行"。
+    test "软删提案的附件也跟着导,关联得上" do
+      proposal = Repo.get_by!(Proposal, legacy_id: "pr2")
+
+      assert proposal.attachment_id
+      assert Repo.get!(Rice.Files.Attachment, proposal.attachment_id).legacy_id == "2-pr2-方案.pdf"
+    end
+
     # §6.4⑥:29 条投票指向软删的提案。不导软删提案的话这些投票外键解析不到
     test "指向软删提案的投票也导得进来" do
       assert Repo.aggregate(Vote, :count) == 3
@@ -450,7 +460,8 @@ defmodule Rice.ImportTest do
         "name" => "提案二",
         "initiator_id" => "u2",
         "end_at" => ~N[2025-06-01 00:00:00],
-        "attach_id" => "",
+        # 软删提案也有附件 —— 附件的收集范围必须和导入范围一致
+        "attach_id" => "2-pr2-方案.pdf",
         "agree_votes" => 1,
         "oppose_votes" => 0,
         "status" => 2,
