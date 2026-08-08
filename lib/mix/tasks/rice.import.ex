@@ -26,12 +26,25 @@ defmodule Mix.Tasks.Rice.Import do
   白名单反过来:默认**只认摆明是测试库的名字**,其余一律拦下来。判断错的方向
   从"放过生产库"变成"多问一次测试库",这是这两种错误里代价小的那个。
 
-  已覆盖:attachments(元数据)/ apps / banners / announcements / site_settings /
-  admin_users。文件本体的搬运见 `mix rice.backfill_attachments`。
+  ## 覆盖范围
 
-  **还没覆盖:users 及其下游**(nodes / badges / badge_awards / grain_transfers /
-  proposals / proposal_votes / proposal_comments)—— 见
-  `docs/backend-migration-plan.md` §6。
+  core 的 14 张表全部覆盖(有几张是合并进来的,见下)。导入顺序即依赖顺序:
+
+      attachments ← apps / banners / announcements / site_settings / admin_users
+                  ← users ← nodes / badges ← badge_awards
+                          ← proposals ← proposal_votes / proposal_comments
+                          ← grain_transfers
+
+  几处不是一对一的:
+
+    * `t_point_record` + `t_point_distribute_record` → `grain_transfers` 一张。
+      每笔转账 core 写两行(收付各一),这里折成一行;后者是前者 `type=3` 的
+      完整副本,只用来对账不作为数据源。
+    * `t_user` / `t_proposal` / `t_proposal_comment` **连软删的行一起导**
+      (带 `deleted_at`)—— 它们的软删行有下游引用。其余表只取 `deleted = 0`。
+    * core 没有附件表,fileId 从七张表的列里收集去重。
+
+  文件本体的搬运是另一个任务:`mix rice.backfill_attachments`。
   """
   use Mix.Task
 

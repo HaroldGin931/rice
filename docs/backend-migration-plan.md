@@ -2,10 +2,11 @@
 
 > 状态:**C 端(36 个接口)与管理端(56 个接口)的后端全部完成**,两个前端
 > (`social-app`、`social-app-admin`)的调用点也已全部切到 rice(进度见 §9)。
-> rice 504 个测试全绿;social-app 分支 `rice-backend` 相对 master 零新增类型错误。
+> `mix rice.import` 覆盖 core 的 14 张表,§7.3 的对账断言全部实现(见 §6.2)。
+> rice 532 个测试全绿;social-app 分支 `rice-backend` 相对 master 零新增类型错误。
 >
-> **剩下的是数据**:`mix rice.import` 只覆盖 6 张表,`users` 及其下游一张都没写
-> (见 §6.2)。全部在本地库开发验证,**生产环境未接触,未做任何数据迁移**。
+> 全部在本地库开发验证,**生产环境未接触,未做任何数据迁移**。
+> 三个分支(`rice/backend-migration`、两个前端的 `rice-backend`)均未合并未部署。
 > 目标:用 Phoenix(rice)替换 .NET 的 `xiangjiandao-core`,顺便把跟着 DDD/EF 脚手架长出来的
 > 数据模型和 RPC 风格 API 重做成 Rails/Phoenix 惯例的样子。
 > 日期:2026-07-27
@@ -624,14 +625,51 @@ rice 已经有到 core MySQL 的连接(`Rice.DaoSql`),直接复用,写一个 `mi
 - `--dry-run` 输出每表行数与冲突数。
 - 结束打一份对账:两库行数、稻米总额、投票数。
 
-**实际进度(2026-08-08):只有 6 张表**。已覆盖 `attachments`(元数据)、`apps`、
-`banners`、`announcements`、`site_settings`、`admin_users`。
+**2026-08-09:14 张表全部覆盖,§7.3 的对账断言全部实现。**
 
-**`users` 及其下游一张都没写** —— `nodes`、`badges`、`badge_awards`、
-`grain_transfers`、`proposals`、`proposal_votes`、`proposal_comments`。
-接口和 schema 都齐了,搬数据的那一半还是空的:现在跑一次导入,得到的是一个
-有内容位、有管理员、**一个用户都没有**的库。§7.3 的对账项(稻米守恒、票数、
-抽样比对)也因此一条都还没实现 —— 那些断言全落在没写的表上。
+导入顺序即依赖顺序:
+
+```
+attachments ← apps / banners / announcements / site_settings / admin_users
+            ← users ← nodes / badges ← badge_awards
+                    ← proposals ← proposal_votes / proposal_comments
+                    ← grain_transfers
+```
+
+几处不是一对一的映射:
+
+| 处理 | 为什么 |
+|---|---|
+| `t_point_record` + `t_point_distribute_record` → 一张 `grain_transfers` | 每笔转账 core 写两行(收付各一),折成一行;后者是前者 `type=3` 的完整副本,**只用来对账,不作为数据源**,否则后台发放会被记两次 |
+| `t_user` / `t_proposal` / `t_proposal_comment` **连软删的行一起导** | 它们的软删行有下游引用(§6.4⑤⑥)。其余表只取 `deleted = 0` |
+| fileId 从**七**张表的列里收集 | core 没有附件表。原来只收了四处,漏掉的那三处(管理员头像、节点 logo、勋章图、提案附件)会静悄悄变成 null,而行数对账看不出来 |
+
+### 折半这一步加了断言
+
+只取 `score > 0` 是有损操作 —— 丢掉的负行必须先证明确实冗余。所以每条正行都要
+在负行里找到配对的那一条(键是 `{付方, 收方, 金额}`,收付视角互换),配不上的
+留警告并计入对账的「流水配对」一项。**没有这层断言,折半就是在猜。**
+
+后台发放不参与配对:它是增发,本来就只有正行。第一版把它算了进去,结果每一条
+发放都被报成「未配对」,真正配不上的反而淹没在里面 —— 被 `import_test.exs` 抓到。
+
+### 对账项(§7.3 全部落地)
+
+每表行数、稻米守恒(余额总和 == 发放总额)、发放副本核对(行数与金额)、
+流水配对、提案票数与投票记录一致、存活用户手机/邮箱/handle/DID 无重复、
+随机 200 个用户逐字段抽样比对。
+
+### 测试
+
+`test/rice/import_test.exs` 跑的是**整条链路**,只有取数那一层是假的
+(`Rice.FakeImportSource`)—— changeset、唯一索引、CHECK 约束、外键解析顺序、
+对账查询全部是真的,打在真的 Postgres 上。数据集刻意复刻了 §6.4 那几条实测
+结论的形状:软删用户与存活用户撞 handle 和手机号、投票指向软删的提案、
+后台发放的 participator 是全零 GUID、流水成对可折半。
+
+桩打在取数这条线上是有意的:导入的风险不在能不能连上 MySQL,而在映射和约束。
+再往深打就会把要测的东西一起桩掉 —— 这个项目在这上面栽过一次(530 个测试
+全绿之后人工实跑抓出约 10 个缺陷,其中 9 个是桩替掉了真正会出错的那一层)。
 
 ### 6.3 期 3 的三个真实风险
 

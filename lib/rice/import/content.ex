@@ -45,40 +45,74 @@ defmodule Rice.Import.Content do
 
   # ── 附件 ────────────────────────────────────────────────────────────────
 
-  # core 没有附件表,fileId 散落在 t_app.logo / t_banner.banner_file_id /
-  # t_information.attach_id / t_global_config.foundation_public_document /
-  # t_admin_user.avatar 里。
+  # core 没有附件表,fileId 散落在七处。漏掉任何一处的表现都一样:
+  # 那一列的图片在 rice 里变成 null,而**行数对账完全看不出来**。
   # 先把它们收集去重,建出 attachments 行;文件本体的搬运是期 2。
+  @file_id_sources [
+    {"t_app", "logo"},
+    {"t_banner", "banner_file_id"},
+    {"t_information", "attach_id"},
+    {"t_admin_user", "avatar"},
+    {"t_node", "logo"},
+    {"t_medal", "attach_id"},
+    {"t_proposal", "attach_id"}
+    # t_user_medal.attach_id 和 t_proposal.initiator_avatar 不收 —— 前者是
+    # t_medal.attach_id 的副本,后者是 t_user.avatar 的副本
+  ]
+
   defp import_attachments do
     file_ids =
-      [
-        Source.query!("SELECT logo AS f FROM t_app WHERE deleted = 0"),
-        Source.query!("SELECT banner_file_id AS f FROM t_banner WHERE deleted = 0"),
-        Source.query!("SELECT attach_id AS f FROM t_information WHERE deleted = 0"),
-        # 管理员头像。漏了这一行,导进来的管理员头像会全部变成 null ——
-        # 而这在对账数字上完全看不出来
-        Source.query!("SELECT avatar AS f FROM t_admin_user WHERE deleted = 0"),
-        foundation_document_ids()
-      ]
+      (Enum.map(@file_id_sources, fn {table, column} ->
+         Source.query!("SELECT `#{column}` AS f FROM `#{table}` WHERE deleted = 0")
+       end) ++ [foundation_document_ids()])
       |> List.flatten()
       |> Enum.map(&extract_file_id/1)
       |> Enum.reject(&(&1 in [nil, ""]))
       |> Enum.uniq()
 
-    insert_each(file_ids, Attachment, fn file_id ->
-      case Attachment.parse_legacy_id(file_id) do
-        {:ok, %{kind: kind, filename: filename}} ->
-          {:ok,
-           Attachment.changeset(%Attachment{}, %{
-             legacy_id: file_id,
-             kind: kind,
-             filename: filename
-           })}
+    # 用户头像单独一路。这一列存过两种东西:老的 fileId,和 PDS 的 blob URL。
+    # 后者在 rice 里没有对应的附件,也不该有 —— 但它有一千多个,混进上面那批
+    # 会给每一个都生成一条"无法解析"的警告,把真正需要看的警告冲掉。
+    # 所以这里先按能不能解析分开,不能解析的只报一个总数。
+    {avatars, unparsable} =
+      Source.query!("SELECT avatar AS f FROM t_user")
+      |> Enum.map(&extract_file_id/1)
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.uniq()
+      |> Enum.split_with(&(Attachment.parse_legacy_id(&1) != :error))
 
-        :error ->
-          {:skip, "无法解析的 fileId: #{inspect(file_id)}"}
-      end
-    end)
+    report = insert_each(Enum.uniq(file_ids ++ avatars), Attachment, &build_attachment/1)
+
+    case unparsable do
+      [] ->
+        report
+
+      list ->
+        %{
+          report
+          | warnings:
+              report.warnings ++
+                [
+                  "t_user.avatar 里有 #{length(list)} 个值不是 fileId(应为 PDS blob URL)," <>
+                    "这些用户在 rice 里没有头像。例:#{inspect(Enum.take(list, 2))}"
+                ]
+        }
+    end
+  end
+
+  defp build_attachment(file_id) do
+    case Attachment.parse_legacy_id(file_id) do
+      {:ok, %{kind: kind, filename: filename}} ->
+        {:ok,
+         Attachment.changeset(%Attachment{}, %{
+           legacy_id: file_id,
+           kind: kind,
+           filename: filename
+         })}
+
+      :error ->
+        {:skip, "无法解析的 fileId: #{inspect(file_id)}"}
+    end
   end
 
   defp extract_file_id(%{"f" => f}), do: f

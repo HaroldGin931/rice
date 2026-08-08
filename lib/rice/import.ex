@@ -5,11 +5,28 @@ defmodule Rice.Import do
   一次导入就是一个事务:dry-run 靠**回滚**实现,而不是靠"只读一遍不写" ——
   只有真的插进去过,才知道唯一约束和外键会不会炸。
   """
-  alias Rice.Import.{AdminUsers, Content}
+  alias Rice.Import.{Accounts, AdminUsers, Audit, Community, Content, Governance, Grains}
   alias Rice.Repo
 
-  # 报告里的表顺序。被依赖的排在前面:附件先建出来,后面几张才解析得到外键。
-  @order [:attachments, :apps, :banners, :announcements, :site_settings, :admin_users]
+  # 报告里的表顺序,也是实际的导入顺序。被依赖的排在前面 ——
+  # 附件先建出来,users 紧随其后(其余每张表的外键都落在它上面),
+  # 勋章发放要等勋章,投票和评论要等提案。
+  @order [
+    :attachments,
+    :apps,
+    :banners,
+    :announcements,
+    :site_settings,
+    :admin_users,
+    :users,
+    :nodes,
+    :badges,
+    :badge_awards,
+    :proposals,
+    :proposal_votes,
+    :proposal_comments,
+    :grain_transfers
+  ]
 
   @doc "报告里表的展示顺序,也是实际的导入顺序。"
   def order, do: @order
@@ -60,15 +77,29 @@ defmodule Rice.Import do
   """
   def run(commit?) do
     fun = fn ->
-      content = Content.import_all()
-      # 管理员头像要查 attachments,必须排在 content 后面
-      admins = AdminUsers.import_all()
+      # 顺序即依赖:每一步都要用到前面几步建出来的 legacy_id → TSID 映射。
+      report =
+        Content.import_all()
+        # 管理员头像要查 attachments
+        |> Map.merge(AdminUsers.import_all())
+        # users 的外键只有头像,但它是后面所有表的外键目标
+        |> Map.merge(Accounts.import_all())
+        |> Map.merge(Community.import_all())
+        |> Map.merge(Governance.import_all())
+        |> Map.merge(Grains.import_all())
 
       # 对账必须在事务**内**算 —— dry-run 会回滚,回滚之后再数就全是 0,
       # 会得出"一条都没导进去"的错误结论。
       result = %{
-        report: Map.merge(content, admins),
-        reconciliation: Content.reconcile() ++ AdminUsers.reconcile()
+        report: report,
+        reconciliation:
+          Content.reconcile() ++
+            AdminUsers.reconcile() ++
+            Accounts.reconcile() ++
+            Community.reconcile() ++
+            Governance.reconcile() ++
+            Grains.reconcile() ++
+            Audit.reconcile()
       }
 
       unless commit?, do: Repo.rollback({:dry_run, result})
