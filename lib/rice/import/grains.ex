@@ -49,9 +49,9 @@ defmodule Rice.Import.Grains do
       """)
 
     {positive, negative} = Enum.split_with(rows, &(score(&1) > 0))
-    unpaired = unpaired_positives(positive, negative)
+    {payers, unpaired} = pair(positive, negative)
 
-    report = insert_each(positive, Transfer, &build(&1, users, unpaired))
+    report = insert_each(positive, Transfer, &build(&1, users, payers, unpaired))
 
     # 零金额的行既不是收也不是付,折半规则覆盖不到,单独点名
     zero = Enum.count(rows, &(score(&1) == 0))
@@ -66,13 +66,16 @@ defmodule Rice.Import.Grains do
   @doc """
   一行 `t_point_record`(正行)→ 一个 changeset。
 
-  `unpaired` 是配不上负行的那些行的 id 集合 —— 落在里面的照常导,但带警告。
+  `payers` 是 `pair/2` 配出来的「正行 id → 付款人」,权威;配不上的落在
+  `unpaired` 里,退回用正行自己的 `participator_id`,并带警告 ——
+  那个字段生产里有错的,所以这是退路而不是首选。
   """
-  def build(row, users, unpaired \\ MapSet.new()) do
+  def build(row, users, payers \\ %{}, unpaired \\ MapSet.new()) do
+    payer = Map.get(payers, row["id"], row["participator_id"])
+
     with {:ok, kind} <- kind(row),
          {:ok, to_id} <- fk(users, row["user_id"], "t_point_record.user_id", row["id"]),
-         {:ok, from_id} <-
-           fk(users, row["participator_id"], "t_point_record.participator_id", row["id"]) do
+         {:ok, from_id} <- fk(users, payer, "t_point_record 的付款人", row["id"]) do
       changeset =
         %Transfer{}
         |> Transfer.changeset(%{
@@ -113,7 +116,7 @@ defmodule Rice.Import.Grains do
       """)
 
     {positive, negative} = Enum.split_with(rows, &(score(&1) > 0))
-    unpaired = unpaired_positives(positive, negative)
+    {_payers, unpaired} = pair(positive, negative)
 
     [%{"c" => dist_rows, "s" => dist_sum}] =
       Source.query!(
@@ -143,51 +146,65 @@ defmodule Rice.Import.Grains do
   # ── 配对 ────────────────────────────────────────────────────────────────
 
   @doc """
-  找出配不上负行的正行 id。
+  把正行和负行配起来。返回 `{%{正行 id => 付款人 legacy_id}, 配不上的正行 id}`。
 
-  配对键是 `{付方, 收方, 金额}` —— 一条 `+N` 的收方行,应当对应一条
-  `user_id` 与 `participator_id` 恰好互换、金额为 `-N` 的付方行。
+  ## 付款人取自负行的 `user_id`,不是正行的 `participator_id`
 
-  用计数而不是集合:同一对用户之间同额转两次是完全正常的,那需要两条负行,
-  用集合会让第二条正行错误地配上已经用掉的那一条。
+  `user_id` 是这一行**记在谁头上**,余额就是按它加减的,两边都可信;
+  `participator_id` 是反规范化的"对方是谁",生产数据里**有 10 笔是错的**
+  (2026-08-09 实测):有的把对方记成了不相干的第三个人,有的记成了自己。
+  其中 4 笔错在正行上 —— 直接信它就会给 rice 写错付款人。
 
-  只有打赏和赠送参与配对,后台发放不参与 —— 见 `paired_type?/1`。
+  钱的流向本身没问题(稻米守恒对得上),错的只是这个副本字段。所以配对之后
+  从负行的 `user_id` 取付款人:那是付款人自己那一行,是权威的。
+
+  ## 配对键
+
+  `{type, created_at, |金额|}`,再要求**至少有一边把对方记对了**
+  (`负行.participator == 正行.user` 或 `正行.participator == 负行.user`)。
+  实测那 10 笔全部满足后半条 —— 两边同时记错的一笔都没有。
+
+  只用金额和时刻会在"同一秒内两笔同额转账"上撞车,所以那个额外条件不是装饰:
+  它既是消歧,也是"这确实是一对"的证据。
+
+  配上一条就消耗一条,同一对用户之间同额转两次是正常的,不能让第二条正行
+  重复配上已经用掉的那条负行。
+
+  后台发放(type=3)不参与:它是增发,本来就只有正行,没有付款方。
   """
-  def unpaired_positives(positive, negative) do
-    pool =
+  def pair(positive, negative) do
+    index =
       negative
       |> Enum.filter(&paired_type?/1)
-      |> Enum.reduce(%{}, fn row, acc ->
-        Map.update(
-          acc,
-          pair_key(row["user_id"], row["participator_id"], -score(row)),
-          1,
-          &(&1 + 1)
-        )
-      end)
+      |> Enum.group_by(&pair_key/1)
 
-    {unpaired, _pool} =
+    {payers, unpaired, _index} =
       positive
       |> Enum.filter(&paired_type?/1)
-      |> Enum.reduce({MapSet.new(), pool}, fn row, {acc, pool} ->
-        # 正行是收方视角,负行是付方视角 —— 两个 id 互换才能对上
-        key = pair_key(row["participator_id"], row["user_id"], score(row))
+      |> Enum.reduce({%{}, MapSet.new(), index}, fn row, {payers, unpaired, index} ->
+        key = pair_key(row)
 
-        case Map.get(pool, key, 0) do
-          0 -> {MapSet.put(acc, row["id"]), pool}
-          n -> {acc, Map.put(pool, key, n - 1)}
+        case Enum.split_with(Map.get(index, key, []), &counterparty_agrees?(&1, row)) do
+          {[match | rest], others} ->
+            {Map.put(payers, row["id"], match["user_id"]), unpaired,
+             Map.put(index, key, rest ++ others)}
+
+          {[], _} ->
+            {payers, MapSet.put(unpaired, row["id"]), index}
         end
       end)
 
-    unpaired
+    {payers, unpaired}
   end
 
-  # 后台发放(type=3)是**增发**,本来就只有正行 —— 它没有付款方,自然也没有
-  # 配对的负行。把它算进配对断言的话每一条发放都会被报成"未配对",
-  # 真正配不上的那些反而淹没在里面。
   defp paired_type?(row), do: row["type"] in [1, 2]
 
-  defp pair_key(from, to, amount), do: {from, to, amount}
+  defp pair_key(row), do: {row["type"], row["created_at"], abs(score(row))}
+
+  defp counterparty_agrees?(negative, positive) do
+    negative["participator_id"] == positive["user_id"] or
+      positive["participator_id"] == negative["user_id"]
+  end
 
   # ── 逐列 ────────────────────────────────────────────────────────────────
 

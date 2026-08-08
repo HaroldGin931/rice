@@ -113,9 +113,16 @@ defmodule Mix.Tasks.Rice.Import do
     end
   end
 
+  # 端口一定要打出来。生产和测试的库在同一个实例上,而本机也有一个同名的
+  # `rice_dev` —— 「连的是哪一个」全看主机和端口(隧道在 15432 之类的本地端口上),
+  # 只印库名的话三个候选长得一模一样。
   defp target_url do
     config = Rice.Repo.config()
-    config[:url] || "#{config[:hostname]}/#{config[:database]}"
+
+    case config[:hostname] do
+      nil -> to_string(config[:url])
+      host -> "#{host}:#{config[:port] || 5432}/#{config[:database]}"
+    end
   end
 
   defp redact(url), do: String.replace(url, ~r{://([^:/@]+):[^@]*@}, "://\\1:***@")

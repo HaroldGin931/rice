@@ -219,6 +219,46 @@ defmodule Rice.ImportTest do
     end
   end
 
+  # 生产实测(2026-08-09):1264 笔非发放流水里有 10 笔的 participator_id 是错的
+  # —— 有的指向不相干的第三个人,有的指向自己。钱的流向没问题(user_id 和 score
+  # 两边都对,稻米守恒也对得上),错的只是这个反规范化的副本字段。
+  describe "付款人取自负行,不信正行的 participator_id" do
+    setup do
+      # 正行说「我从 u3 收的」,但真正付钱的是 u1(负行的 user_id)
+      Fake.put("t_point_record", [
+        point_record("p1", "u1", @zero_guid, 3, 400, ""),
+        point_record("p2", "u2", @zero_guid, 3, 100, ""),
+        %{
+          point_record("p3", "u2", "u3", 2, 100, "记错了对方")
+          | "created_at" => ~N[2025-05-05 05:05:05]
+        },
+        %{
+          point_record("p4", "u1", "u2", 2, -100, "记错了对方")
+          | "created_at" => ~N[2025-05-05 05:05:05]
+        }
+      ])
+
+      {:ok, _} = Rice.Import.run(true)
+      :ok
+    end
+
+    test "付款人是负行的 user_id,不是正行写的那个人" do
+      gift = Repo.get_by!(Transfer, legacy_id: "p3")
+
+      assert gift.from_user_id == Repo.get_by!(User, legacy_id: "u1").id
+      refute gift.from_user_id == Repo.get_by!(User, legacy_id: "u3").id
+      assert gift.to_user_id == Repo.get_by!(User, legacy_id: "u2").id
+    end
+
+    # 一边记错了照样配得上,因为另一边是对的(负行的 participator 指向 u2 = 收方)
+    test "配对仍然成立,不报未配对" do
+      {:ok, %{report: report, reconciliation: reconciliation}} = Rice.Import.run(true)
+
+      assert report.grain_transfers.warnings == []
+      assert Enum.find(reconciliation, &(&1.name =~ "流水配对")).ok?
+    end
+  end
+
   describe "脏数据" do
     test "配不上负行的正行照导,但记警告并且对账标红" do
       # 一条凭空出现的打赏收方行,没有对应的付方行

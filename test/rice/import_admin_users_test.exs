@@ -170,10 +170,16 @@ defmodule Rice.Import.AdminUsersTest do
   end
 
   describe "格式不对的行进警告,不进库" do
-    test "手机号里有加号" do
-      assert {:ok, changeset} = AdminUsers.build(row(%{"phone" => "+8613800000000"}))
-      refute changeset.valid?
-      assert %{phone: ["手机号格式不正确"]} = errors_on(changeset)
+    # 生产里真有一行的 phone 是 `AliyunDMSLoginConsoleAccess`(从阿里云 DMS
+    # 控制台写进去的)。交给 changeset 去拦也拦得住,但报出来是一个光秃秃的
+    # `[phone: {"手机号格式不正确", …}]`,看不出是哪个管理员 —— 所以提前拦,
+    # 把值和原因都写进警告里
+    test "手机号根本不是号码时,跳过并点名" do
+      for bad <- ["+8613800000000", "AliyunDMSLoginConsoleAccess", "138-0000-0000"] do
+        assert {:skip, message} = AdminUsers.build(row(%{"phone" => bad}))
+        assert message =~ bad
+        assert message =~ "收不到验证码"
+      end
     end
 
     test "邮箱不是邮箱" do

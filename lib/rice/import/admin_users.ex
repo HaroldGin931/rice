@@ -33,9 +33,13 @@ defmodule Rice.Import.AdminUsers do
   # core 的 RoleType:0-未知、1-管理员、2-运营人员
   @roles %{1 => "admin", 2 => "operator"}
 
-  # 只有这两个条件都满足的行才是"打算导入的",对账拿它当分母 ——
-  # 否则库里只要有一个没手机号的旧账号,对账就永远是 ❌,看的人很快会学会忽略它
-  @importable "deleted = 0 AND phone <> '' AND role IN (1, 2)"
+  # 只有这几个条件都满足的行才是"打算导入的",对账拿它当分母 ——
+  # 否则库里只要有一个进不来的旧账号,对账就永远是 ❌,看的人很快会学会忽略它。
+  #
+  # `phone` 那条是正则而不是 `<> ''`:生产里有一行的手机号是字符串
+  # **`AliyunDMSLoginConsoleAccess`**(2026-08-09 实测)—— 有人从阿里云 DMS
+  # 控制台直接写进去的。那个账号在 core 里也收不到验证码,本来就登不进去。
+  @importable "deleted = 0 AND role IN (1, 2) AND phone REGEXP '^[0-9]{5,20}$'"
 
   @doc "跑一遍,返回 `%{admin_users: %{inserted:, skipped:, warnings:}}`。"
   def import_all do
@@ -102,10 +106,18 @@ defmodule Rice.Import.AdminUsers do
 
   defp role(value), do: {:skip, "role 不是整数: #{inspect(value)}"}
 
+  # 格式在 `import_changeset` 里也会校一遍,但那条路上报出来的是一个光秃秃的
+  # `[phone: {"手机号格式不正确", …}]`,看不出是哪一个管理员。这里提前拦下,
+  # 把 legacy_id 带上 —— 警告要能顺着它回 MySQL 把那一行找出来。
   defp phone(value) do
     case blank_to_nil(value) do
-      nil -> {:skip, "没有手机号,在 rice 里登不进来也找不回密码,跳过"}
-      phone -> {:ok, phone}
+      nil ->
+        {:skip, "没有手机号,在 rice 里登不进来也找不回密码,跳过"}
+
+      phone ->
+        if Regex.match?(~r/^\d{5,20}$/, phone),
+          do: {:ok, phone},
+          else: {:skip, "手机号不是号码(#{inspect(phone)}),这个账号收不到验证码,跳过"}
     end
   end
 
