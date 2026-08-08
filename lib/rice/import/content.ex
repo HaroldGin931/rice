@@ -8,7 +8,7 @@ defmodule Rice.Import.Content do
   事务和 dry-run 的回滚在 `Rice.Import` 里,这里只管映射。
   """
   import Ecto.Query
-  import Rice.Import.Writer, only: [insert_each: 3]
+  import Rice.Import.Writer, only: [insert_each: 3, keep_timestamps: 2]
 
   alias Rice.Content.{Announcement, App, Banner}
   alias Rice.Files.Attachment
@@ -145,49 +145,62 @@ defmodule Rice.Import.Content do
   # ── 内容位 ──────────────────────────────────────────────────────────────
 
   defp import_apps do
-    rows = Source.query!("SELECT id, name, `desc`, logo, link, sort FROM t_app WHERE deleted = 0")
+    rows =
+      Source.query!(
+        "SELECT id, name, `desc`, logo, link, sort, created_at, updated_at FROM t_app WHERE deleted = 0"
+      )
 
     insert_each(rows, App, fn row ->
       {:ok,
-       App.changeset(%App{}, %{
+       %App{}
+       |> App.changeset(%{
          legacy_id: row["id"],
          name: row["name"],
          description: row["desc"] || "",
          url: row["link"] || "",
          position: row["sort"] || 0,
          logo_id: attachment_id(row["logo"])
-       })}
+       })
+       |> keep_timestamps(row)}
     end)
   end
 
   defp import_banners do
     rows =
       Source.query!(
-        "SELECT id, banner_file_id, link_address, sort FROM t_banner WHERE deleted = 0"
+        "SELECT id, banner_file_id, link_address, sort, created_at, updated_at " <>
+          "FROM t_banner WHERE deleted = 0"
       )
 
     insert_each(rows, Banner, fn row ->
       {:ok,
-       Banner.changeset(%Banner{}, %{
+       %Banner{}
+       |> Banner.changeset(%{
          legacy_id: row["id"],
          url: row["link_address"] || "",
          position: row["sort"] || 0,
          image_id: attachment_id(row["banner_file_id"])
-       })}
+       })
+       |> keep_timestamps(row)}
     end)
   end
 
   defp import_announcements do
-    rows = Source.query!("SELECT id, name, attach_id, sort FROM t_information WHERE deleted = 0")
+    rows =
+      Source.query!(
+        "SELECT id, name, attach_id, sort, created_at, updated_at FROM t_information WHERE deleted = 0"
+      )
 
     insert_each(rows, Announcement, fn row ->
       {:ok,
-       Announcement.changeset(%Announcement{}, %{
+       %Announcement{}
+       |> Announcement.changeset(%{
          legacy_id: row["id"],
          title: row["name"],
          position: row["sort"] || 0,
          attachment_id: attachment_id(row["attach_id"])
-       })}
+       })
+       |> keep_timestamps(row)}
     end)
   end
 

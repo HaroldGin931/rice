@@ -176,6 +176,31 @@ defmodule Rice.ImportTest do
     end
   end
 
+  # 「创建时间」这一列在 rice 的公告 / 应用 JSON 里是直接给前端的。
+  # 期 1 那三张表的导入器当初没跟着加 keep_timestamps,导进来全变成导入那一刻,
+  # 而其余每张表都是照搬的 —— 同一个库里两套规则。
+  describe "内容位的时间戳也照搬" do
+    setup do
+      {:ok, _} = Rice.Import.run(true)
+      :ok
+    end
+
+    test "apps / banners / announcements 的创建时间来自 core,不是导入时刻" do
+      for {schema, legacy} <- [
+            {Rice.Content.App, "app1"},
+            {Rice.Content.Banner, "b1"},
+            {Rice.Content.Announcement, "i1"}
+          ] do
+        record = Repo.get_by!(schema, legacy_id: legacy)
+
+        assert DateTime.to_date(record.inserted_at) == ~D[2025-03-04],
+               "#{inspect(schema)} 的 inserted_at 是 #{record.inserted_at}"
+
+        assert DateTime.to_date(record.updated_at) == ~D[2025-03-05]
+      end
+    end
+  end
+
   describe "节点与勋章" do
     setup do
       {:ok, _} = Rice.Import.run(true)
