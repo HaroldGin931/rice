@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Find eligible builder and runner images on Docker Hub. We use Ubuntu/Debian
 # instead of Alpine to avoid DNS resolution issues in production.
 #
@@ -37,7 +38,13 @@ ENV MIX_ENV="prod"
 
 # install mix dependencies
 COPY mix.exs mix.lock ./
-RUN mix deps.get --only $MIX_ENV
+# 只挂 hex/rebar 的**包缓存**。绝不能挂 /app/deps 或 /app/_build ——
+# cache mount 的内容不进镜像层，而后面 `mix compile` 要 deps、
+# 最终 `COPY --from=builder /app/_build/...` 要 release 产物，
+# 挂了就会拷到空目录，且报错发生在运行时而不是构建时。
+RUN --mount=type=cache,target=/root/.hex,sharing=locked \
+    --mount=type=cache,target=/root/.cache/rebar3,sharing=locked \
+    mix deps.get --only $MIX_ENV
 RUN mkdir config
 
 # copy compile-time config files before we compile dependencies
