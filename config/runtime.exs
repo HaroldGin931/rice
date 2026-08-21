@@ -79,8 +79,27 @@ config :rice, :dao,
   mysql_database: System.get_env("DAO_MYSQL_DATABASE") || "xiangjiandao",
   # 签名用的 JWKS 原文（JSON 数组）。2026-08-21 之前是每次去共享 Redis 读
   # `netcorepal:jwtsettings`；core 停机后那把钥匙没有写入者也不进备份，
-  # 于是搬进 secret/xjdao 的 dao_jwks。详见 Rice.Dao 的模块文档。
-  jwks: System.get_env("DAO_JWKS"),
+  # 于是搬进 secret/xjdao。详见 Rice.Dao 的模块文档。
+  #
+  # ⚠️ **必须走 base64，不能直接放 JSON。** Nomad 的 env 模板用 go-envparse
+  # 解析 `KEY=VALUE`，它会把值里的双引号**吃掉** —— 实测注入进来的是
+  # `[{PrivateKey:MII...}]`，引号全没了，于是 Jason 在第 2 个字符就报错。
+  # 这类问题不会在本地复现（本地是直接给环境变量），只在 Nomad 里炸。
+  jwks:
+    (case System.get_env("DAO_JWKS_B64") do
+       b64 when is_binary(b64) and b64 != "" ->
+         case Base.decode64(b64) do
+           {:ok, json} ->
+             json
+
+           :error ->
+             raise "DAO_JWKS_B64 不是合法 base64；生成方式：base64 -w0 jwks.json"
+         end
+
+       _ ->
+         # 本地/测试直接给 JSON 原文即可
+         System.get_env("DAO_JWKS")
+     end),
   # Mirror the DAO backend's Jwt__* env (issuer/audience are not validated
   # by the .NET side, kept identical for fidelity; 43200 min = 30 days).
   jwt_issuer: System.get_env("DAO_JWT_ISSUER") || "xiangjiandao",

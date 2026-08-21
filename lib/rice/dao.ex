@@ -27,9 +27,13 @@ defmodule Rice.Dao do
   Redis 的卷一丢就再也生不出来，而 rice 这边的表现只是一行 warning ——
   又一个静默失败。
 
-  现在改成从配置读（`DAO_JWKS`，值即那段 JSON 原文），由 Nomad Variable
-  `secret/xjdao` 的 `dao_jwks` 注入，跟着 `backup.sh` 一起备份。
-  **rice 因此不再连 Redis。**
+  现在改成从配置读，由 Nomad Variable `secret/xjdao` 的 `dao_jwks_b64` 注入
+  （`DAO_JWKS_B64`），跟着 `backup.sh` 一起备份。**rice 因此不再连 Redis。**
+
+  > ⚠️ **为什么是 base64 而不是直接放 JSON。** Nomad 的 env 模板用
+  > go-envparse 解析 `KEY=VALUE`，它会把值里的**双引号吃掉**。第一次上线
+  > 就是这么坏的：注入进来的是 `[{PrivateKey:MII...}]`，Jason 在第 2 个字符
+  > 报错。本地给环境变量不会复现，只在 Nomad 里炸。
 
   > 存进去之前做过自检：`PrivateKey`(PKCS#1 DER) 里的模数与 JWK 的 `N` 一致，
   > 2048 位，e=65537。⚠️ `N` 是**标准 base64**（含 `+` `/`），不是 base64url ——
