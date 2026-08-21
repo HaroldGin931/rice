@@ -19,10 +19,67 @@ defmodule Rice.Accounts do
 
   def get_link_by_sub(sub) when is_binary(sub), do: Repo.get_by(SemiLink, semi_sub: sub)
 
+  def get_link_by_did(did) when is_binary(did), do: Repo.get_by(SemiLink, did: did)
+  def get_link_by_did(_), do: nil
+
   def create_link(attrs) do
     %SemiLink{}
     |> SemiLink.changeset(attrs)
     |> Repo.insert()
+  end
+
+  @doc """
+  刷新链接上的钱包地址。**每次 Semi 登录都调** —— 用户可能是先用 Semi 注册、
+  之后才在 Semi 那边绑的钱包,只在建链接时写一次的话那些人永远看不到地址。
+
+  值没变就不写,避免每次登录都产生一次 UPDATE。
+  """
+  def update_link_wallet(%SemiLink{} = link, wallet_address) do
+    wallet = normalize_wallet(wallet_address)
+
+    if wallet == link.wallet_address do
+      {:ok, link}
+    else
+      link |> SemiLink.changeset(%{wallet_address: wallet}) |> Repo.update()
+    end
+  end
+
+  defp normalize_wallet(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_wallet(_), do: nil
+
+  @doc """
+  给一个 did 找到 rice 档案,没有就建一个。Semi 登录链路用。
+
+  Semi 用户的身份权威在 PDS(`Rice.Bridge` 建的账号),但 C 端整套业务接口都以
+  rice 的 `users` 行为准 —— 没有这一行,`/api/*` 全是 401,提案、评论、稻米余额
+  一个都用不了。所以桥接完 PDS 之后必须在这里落一行。
+
+  已存在就原样返回(**不覆盖**昵称等字段:用户可能已经在 app 里改过)。
+
+  软删的用户不算数 —— `get_user_by_did/1` 只看活着的行,而两个唯一索引都带
+  `where deleted_at is null`,所以注销过的人再用 Semi 登录会得到一份新档案,
+  而不是把注销掉的那份挖出来。
+  """
+  def ensure_user_for_did(%{did: did, handle: handle} = identity) do
+    case get_user_by_did(did) do
+      %User{} = user ->
+        {:ok, user}
+
+      nil ->
+        attrs = %{
+          did: did,
+          handle: handle,
+          nickname: Map.get(identity, :nickname) || default_nickname(handle)
+        }
+
+        %User{} |> User.registration_changeset(attrs) |> Repo.insert()
+    end
   end
 
   # ── 查询 ────────────────────────────────────────────────────────────────
@@ -355,7 +412,7 @@ defmodule Rice.Accounts do
             case pds().create_session(user.handle, password) do
               {:ok, session} ->
                 {:ok, token} = issue_token(user)
-                {:ok, %{user: user, token: token, pds_session: session}}
+                {:ok, %{user: put_semi_wallet(user), token: token, pds_session: session}}
 
               {:error, _} ->
                 {:error, :invalid_credentials}
@@ -395,11 +452,29 @@ defmodule Rice.Accounts do
       {token, _user} ->
         # 只在超过一分钟没更新时才写,避免每个请求都产生一次写
         maybe_touch(token, now)
-        Repo.preload(token, user: :avatar).user
+        Repo.preload(token, user: :avatar).user |> put_semi_wallet()
     end
   end
 
   def user_by_token(_), do: nil
+
+  @doc """
+  把 `semi_links` 上的钱包地址填进用户的虚拟字段。
+
+  在这里做(而不是在视图里现查)是为了让每个"当前用户"都自带这个字段 ——
+  `/api/users/me` 和登录响应共用同一个 `UserJSON.data/1`,两边都要有。
+  多一次按 did 的索引查询,表只有几行,代价可以忽略。
+
+  非 Semi 用户查不到链接,字段保持 nil。
+  """
+  def put_semi_wallet(%User{} = user) do
+    case get_link_by_did(user.did) do
+      %SemiLink{wallet_address: wallet} -> %{user | wallet_address: wallet}
+      _ -> user
+    end
+  end
+
+  def put_semi_wallet(other), do: other
 
   defp maybe_touch(token, now) do
     stale? =

@@ -19,6 +19,57 @@ defmodule RiceWeb.Api.UserControllerTest do
       assert data["node_member"] == false
     end
 
+    test "Semi 用户带出钱包地址", %{conn: conn} do
+      {user, token} = user_with_token()
+
+      {:ok, _} =
+        Rice.Accounts.create_link(%{
+          semi_sub: "semi-sub-1",
+          did: user.did,
+          handle: user.handle,
+          account_password_ciphertext: Rice.Vault.encrypt("pw"),
+          wallet_address: "0x1234567890abcdef1234567890abcdef12345678"
+        })
+
+      assert %{"data" => data} =
+               conn |> authed(token) |> get(~p"/api/users/me") |> json_response(200)
+
+      assert data["wallet_address"] == "0x1234567890abcdef1234567890abcdef12345678"
+    end
+
+    test "非 Semi 用户的钱包地址是 null", %{conn: conn} do
+      {_user, token} = user_with_token()
+
+      assert %{"data" => data} =
+               conn |> authed(token) |> get(~p"/api/users/me") |> json_response(200)
+
+      assert Map.has_key?(data, "wallet_address")
+      assert data["wallet_address"] == nil
+    end
+
+    # 地址在链上是公开的,但和社交身份绑一起会把可关联性拉高 ——
+    # 要不要外露是产品决定,默认不外露。
+    test "钱包地址不出现在别人看得到的地方", %{conn: conn} do
+      # node_member 不在 registration_changeset 里(注册时不该自称节点成员)
+      user =
+        user_fixture() |> Ecto.Changeset.change(node_member: true) |> Rice.Repo.update!()
+
+      {:ok, _} =
+        Rice.Accounts.create_link(%{
+          semi_sub: "semi-sub-2",
+          did: user.did,
+          handle: user.handle,
+          account_password_ciphertext: Rice.Vault.encrypt("pw"),
+          wallet_address: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        })
+
+      assert %{"data" => [member]} =
+               conn |> get(~p"/api/nodes/members") |> json_response(200)
+
+      assert member["did"] == user.did
+      refute Map.has_key?(member, "wallet_address")
+    end
+
     test "未认证 401", %{conn: conn} do
       assert conn |> get(~p"/api/users/me") |> json_response(401)
     end

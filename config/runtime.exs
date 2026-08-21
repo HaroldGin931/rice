@@ -90,14 +90,15 @@ config :rice, :dao,
 # Key for encrypting stored account passwords at rest (32 raw bytes,
 # base64-encoded in RICE_LINK_ENC_KEY). Left nil when unset so non-bridge
 # environments boot fine; Rice.Vault raises only if actually used.
-rice_link_enc_key =
-  case System.get_env("RICE_LINK_ENC_KEY") do
-    nil -> nil
-    "" -> nil
-    b64 -> Base.decode64!(b64)
-  end
-
-config :rice, Rice.Vault, key: rice_link_enc_key
+#
+# 只在环境变量真的设了的时候才写 —— 和上面 CORS_ORIGINS 同样的道理:
+# runtime.exs 在 test.exs **之后**执行,无条件写会把测试里配好的固定密钥
+# 清成 nil,而 Vault 一被用到就 raise(Semi 桥接的测试全跑不了)。
+case System.get_env("RICE_LINK_ENC_KEY") do
+  nil -> :ok
+  "" -> :ok
+  b64 -> config :rice, Rice.Vault, key: Base.decode64!(b64)
+end
 
 if config_env() == :prod do
   database_url =

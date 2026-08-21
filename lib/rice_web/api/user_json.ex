@@ -17,6 +17,11 @@ defmodule RiceWeb.Api.UserJSON do
       email: user.email,
       phone: user.phone,
       phone_region: user.phone_region,
+      # Semi 登录用户的钱包地址(来自 semi_links,由 Accounts.put_semi_wallet/1
+      # 填进虚拟字段)。非 Semi 用户是 null。**只在这里出现,不进 public/1** ——
+      # 地址本身在链上是公开的,但和社交身份绑一起就把可关联性拉高了,
+      # 该不该外露是产品决定,不是默认行为。
+      wallet_address: user.wallet_address,
       inserted_at: user.inserted_at
     }
   end

@@ -21,6 +21,11 @@ defmodule Rice.Accounts.User do
     field :disabled_at, :utc_datetime_usec
     field :deleted_at, :utc_datetime_usec
 
+    # Semi 的钱包地址。不是 users 自己的列 —— 权威在 `semi_links.wallet_address`,
+    # 由 `Accounts.put_semi_wallet/1` 在取当前用户时填进来。用虚拟字段而不是
+    # 在视图里现查,是为了让 JSON 层保持"只读结构体"这条规矩。
+    field :wallet_address, :string, virtual: true
+
     belongs_to :avatar, Rice.Files.Attachment
 
     timestamps()

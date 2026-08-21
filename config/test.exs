@@ -53,3 +53,7 @@ config :phoenix,
 
 # 测试里用一个固定的来源,断言才有东西可对
 config :rice, :cors, origins: ["http://localhost:8081"]
+
+# Semi 桥接存的账号密码是加密落库的,固定密钥才好断言(生产的真值来自
+# RICE_LINK_ENC_KEY)。32 字节裸二进制,不是 base64。
+config :rice, Rice.Vault, key: String.duplicate("t", 32)
