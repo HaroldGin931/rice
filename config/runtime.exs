@@ -77,10 +77,10 @@ config :rice, :dao,
   mysql_user: System.get_env("DAO_MYSQL_USER") || "xiangjiandao",
   mysql_password: System.get_env("DAO_MYSQL_PASSWORD"),
   mysql_database: System.get_env("DAO_MYSQL_DATABASE") || "xiangjiandao",
-  redis_host: System.get_env("DAO_REDIS_HOST") || "127.0.0.1",
-  redis_port: String.to_integer(System.get_env("DAO_REDIS_PORT") || "6379"),
-  redis_password: System.get_env("DAO_REDIS_PASSWORD"),
-  redis_database: String.to_integer(System.get_env("DAO_REDIS_DATABASE") || "1"),
+  # 签名用的 JWKS 原文（JSON 数组）。2026-08-21 之前是每次去共享 Redis 读
+  # `netcorepal:jwtsettings`；core 停机后那把钥匙没有写入者也不进备份，
+  # 于是搬进 secret/xjdao 的 dao_jwks。详见 Rice.Dao 的模块文档。
+  jwks: System.get_env("DAO_JWKS"),
   # Mirror the DAO backend's Jwt__* env (issuer/audience are not validated
   # by the .NET side, kept identical for fidelity; 43200 min = 30 days).
   jwt_issuer: System.get_env("DAO_JWT_ISSUER") || "xiangjiandao",

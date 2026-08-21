@@ -4,10 +4,9 @@ defmodule Rice.Dao do
   login-token issuance for Semi users.
 
   The DAO backend (.NET, `xiangjiandao-core`) authenticates its own API with
-  an RS256 JWT ("daoJwt") whose signing keys live in the shared Redis under
-  `netcorepal:jwtsettings` (a JSON array of JWKs with PKCS#1 `PrivateKey`),
-  and whose `uid` claim must reference an existing `t_user` row in the shared
-  MySQL database. Token validation on the .NET side checks only lifetime and
+  an RS256 JWT ("daoJwt") signed by a JWK (a JSON array of JWKs with PKCS#1
+  `PrivateKey`) whose `uid` claim must reference an existing `t_user` row in
+  the shared MySQL database. Token validation on the .NET side checks only lifetime and
   signature (issuer/audience unvalidated) plus the `type=client` claim.
 
   `token_for/2` therefore does two things:
@@ -19,8 +18,27 @@ defmodule Rice.Dao do
   token, mirroring the .NET `TokenVo.AccessToken`) or `{:error, reason}`.
   Callers treat failures as non-fatal: a Semi login without a daoJwt still
   yields a working AT Protocol session.
+
+  ## 签名密钥从哪来（2026-08-21 改）
+
+  原来是每次签名去共享 Redis 读 `netcorepal:jwtsettings` —— 那是 core 自己
+  写进去的 key。**core 已于 2026-08-21 停机**，于是那把钥匙变成了:
+  没有 TTL、没有写入者、**不在任何备份里**（`backup.sh` 里 grep 不到 redis）。
+  Redis 的卷一丢就再也生不出来，而 rice 这边的表现只是一行 warning ——
+  又一个静默失败。
+
+  现在改成从配置读（`DAO_JWKS`，值即那段 JSON 原文），由 Nomad Variable
+  `secret/xjdao` 的 `dao_jwks` 注入，跟着 `backup.sh` 一起备份。
+  **rice 因此不再连 Redis。**
+
+  > 存进去之前做过自检：`PrivateKey`(PKCS#1 DER) 里的模数与 JWK 的 `N` 一致，
+  > 2048 位，e=65537。⚠️ `N` 是**标准 base64**（含 `+` `/`），不是 base64url ——
+  > 按 base64url 解会得到不同的字节而误判成"钥匙对不上"。
+
+  这条链路本身是**过渡性的**：daoJwt 现在没有任何消费者（C 端产物里
+  `/api/v1/` 是 0 处），保留它只是为了 core 的回滚退路。观察期结束后
+  连同 `Rice.Dao` 一起删掉。
   """
-  @jwks_redis_key "netcorepal:jwtsettings"
 
   def enabled? do
     config()[:mysql_password] not in [nil, ""]
@@ -80,7 +98,7 @@ defmodule Rice.Dao do
     end
   end
 
-  # ── JWT signing (RS256, key from the DAO's NetCorePal JWKS in Redis) ────
+  # ── JWT signing (RS256, key from the configured NetCorePal JWKS) ────────
 
   defp mint_jwt(uid, identity) do
     with {:ok, %{"Kid" => kid, "PrivateKey" => pk_b64}} <- current_jwk() do
@@ -116,15 +134,24 @@ defmodule Rice.Dao do
     end
   end
 
-  defp current_jwk do
-    with {:ok, json} when is_binary(json) <-
-           Redix.command(Rice.DaoRedis, ["GET", @jwks_redis_key]),
-         {:ok, [_ | _] = keys} <- Jason.decode(json) do
-      {:ok, List.last(keys)}
-    else
-      {:ok, nil} -> {:error, :jwks_not_found}
-      {:error, reason} -> {:error, {:redis, reason}}
-      other -> {:error, {:jwks_unexpected, other}}
+  @doc """
+  当前用于签名的 JWK。
+
+  取自配置(`DAO_JWKS`),**不再读 Redis** —— 见模块文档最后一节。
+  沿用 core 的选法:数组最后一个。
+  """
+  def current_jwk do
+    case config()[:jwks] do
+      json when is_binary(json) and json != "" ->
+        case Jason.decode(json) do
+          {:ok, [_ | _] = keys} -> {:ok, List.last(keys)}
+          {:ok, []} -> {:error, :jwks_empty}
+          {:ok, other} -> {:error, {:jwks_unexpected, other}}
+          {:error, reason} -> {:error, {:jwks_not_json, reason}}
+        end
+
+      _ ->
+        {:error, :jwks_not_configured}
     end
   end
 
