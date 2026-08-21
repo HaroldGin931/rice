@@ -3,8 +3,10 @@ defmodule RiceWeb.CorsTest do
   跨域。
 
   C 端 app 和 rice **从来不同源**(app 在 `xjdao.xyz`,rice 在 `rice.xjdao.xyz`),
-  所以这不是开发期的方便,是 web 版能不能用的前提。原生 app 不走 CORS ——
-  也就是说这个洞在真机上完全看不出来,只在浏览器里炸。
+  所以这不是开发期的方便,是能不能用的前提 —— 而且失败是静默的:页面能打开、
+  请求全被拦、控制台没有任何指向 CORS 的报错。
+
+  (xjdao 只有 web,没有原生 app;这里原先那句"真机上看不出来"是误写。)
   """
   use RiceWeb.ConnCase, async: true
 

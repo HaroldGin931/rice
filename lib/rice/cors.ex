@@ -3,8 +3,12 @@ defmodule Rice.Cors do
   允许跨域访问 rice API 的来源。
 
   C 端 app 和 rice 从来不同源(app 在 `xjdao.xyz`,rice 在 `rice.xjdao.xyz`),
-  所以这不是开发期才需要的东西 —— 生产上 web 版也靠它。原生 app 不走 CORS,
-  所以这个洞在真机上完全看不出来。
+  所以这不是开发期才需要的东西 —— 生产也靠它。
+
+  (更正:这里原来写着"原生 app 不走 CORS,所以这个洞在真机上看不出来"。
+  xjdao **没有原生 app**,只有 web —— `social-app` 是 Bluesky 的 fork,
+  Expo/EAS 那套东西还在仓库里,但 `app.config.js` 至今是上游的,构建流水线
+  只出 web 镜像。那句话是 CORS 的一般性质,不是这个项目的事实。)
 
   **不用 `*`。** 白名单意味着改域名要改配置,但 `*` 意味着任何网页都能拿着
   用户浏览器里的令牌来调这套 API。多一行配置换这个,划算。
