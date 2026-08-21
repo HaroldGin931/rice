@@ -26,9 +26,22 @@ defmodule Rice.Content do
 
   # ── 公告 ────────────────────────────────────────────────────────────────
 
-  @doc "公告分页。新的在前。"
+  @doc """
+  公告分页。**按 position 升序**,同一位置里新的在前。
+
+  公告栏的顺序是后台拖出来的 —— 和应用入口、轮播位一样,由运营定,不是时间序。
+  core 那边是 `ORDER BY Sort ASC, CreatedAt DESC`,这里保持一致;只按 id 倒序的话
+  大厅首页那三条的顺序和生产对不上。
+
+  游标是 id,和这个顺序对不上 —— 只有当 position 全相等时翻页才准确。公告是个位数
+  量级,C 端两处调用(大厅取 3 条、列表取 100 条)都是一次取全,不翻页。真要翻页
+  得先给 `Pagination` 加按 position 的游标。
+  """
   def list_announcements(params \\ %{}) do
-    from(a in Announcement, preload: [:attachment])
+    from(a in Announcement,
+      order_by: [asc: a.position, desc: a.inserted_at],
+      preload: [:attachment]
+    )
     |> Pagination.paginate(Repo, Pagination.params(params))
   end
 

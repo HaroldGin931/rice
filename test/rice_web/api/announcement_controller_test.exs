@@ -7,13 +7,34 @@ defmodule RiceWeb.Api.AnnouncementControllerTest do
                conn |> get(~p"/api/announcements") |> json_response(200)
     end
 
-    test "新的在前", %{conn: conn} do
+    test "position 相同时新的在前", %{conn: conn} do
       a = announcement_fixture(%{title: "第一条"})
       b = announcement_fixture(%{title: "第二条"})
       c = announcement_fixture(%{title: "第三条"})
 
       assert %{"data" => data} = conn |> get(~p"/api/announcements") |> json_response(200)
       assert Enum.map(data, & &1["id"]) == [c.id, b.id, a.id]
+    end
+
+    # 公告栏的顺序是后台拖出来的。只按 id 倒序的话,大厅首页那三条的顺序
+    # 和生产对不上 —— 生产是 `Sort ASC, CreatedAt DESC`。
+    test "按 position 升序,压过时间序", %{conn: conn} do
+      last = announcement_fixture(%{title: "排最后的", position: 2})
+      first = announcement_fixture(%{title: "排最前的", position: 0})
+      middle = announcement_fixture(%{title: "排中间的", position: 1})
+
+      assert %{"data" => data} = conn |> get(~p"/api/announcements") |> json_response(200)
+      assert Enum.map(data, & &1["title"]) == ["排最前的", "排中间的", "排最后的"]
+      assert Enum.map(data, & &1["id"]) == [first.id, middle.id, last.id]
+    end
+
+    test "同一 position 内部仍按时间倒序", %{conn: conn} do
+      old = announcement_fixture(%{title: "同位置的旧公告", position: 1})
+      new = announcement_fixture(%{title: "同位置的新公告", position: 1})
+      top = announcement_fixture(%{title: "置顶", position: 0})
+
+      assert %{"data" => data} = conn |> get(~p"/api/announcements") |> json_response(200)
+      assert Enum.map(data, & &1["id"]) == [top.id, new.id, old.id]
     end
 
     test "响应字段齐全", %{conn: conn} do
