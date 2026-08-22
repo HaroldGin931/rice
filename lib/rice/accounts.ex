@@ -92,6 +92,21 @@ defmodule Rice.Accounts do
 
   def get_user_by_did(did), do: Repo.one(from u in active_users(), where: u.did == ^did)
 
+  @doc """
+  按 core 的 `t_user.id` 找人 —— 只有老 daoJwt 的兜底认证会用到(它的 `uid`
+  claim 就是这个值)。禁用的人不返回,和 `user_by_token/1` 一致。
+  """
+  def get_user_by_legacy_id(legacy_id) when is_binary(legacy_id) and legacy_id != "" do
+    Repo.one(
+      from u in active_users(),
+        where: u.legacy_id == ^legacy_id and is_nil(u.disabled_at),
+        preload: [:avatar]
+    )
+    |> put_semi_wallet()
+  end
+
+  def get_user_by_legacy_id(_), do: nil
+
   @doc "按 handle / 邮箱 / 手机号找人 —— 登录时用。"
   def get_user_by_identifier(identifier) when is_binary(identifier) do
     normalized = String.downcase(String.trim(identifier))
