@@ -32,6 +32,12 @@ defmodule RiceWeb.Api.FallbackController do
     |> render(:"403")
   end
 
+  def call(conn, {:error, :conflict}) do
+    conn
+    |> put_status(:conflict)
+    |> json(%{errors: %{detail: "资源状态已经变化，请刷新后重试"}})
+  end
+
   def call(conn, {:error, reason})
       when reason in [
              :invalid_ticket,

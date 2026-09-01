@@ -27,6 +27,27 @@ defmodule Rice.Fixtures do
     {user, token}
   end
 
+  def task_publisher_fixture(attrs \\ %{}) do
+    attrs
+    |> user_fixture()
+    |> Ecto.Changeset.change(can_publish_tasks: true)
+    |> Repo.update!()
+  end
+
+  def task_fixture(creator, attrs \\ %{}) do
+    n = System.unique_integer([:positive])
+
+    attrs =
+      Enum.into(attrs, %{
+        title: "任务#{n}",
+        description: "完成任务#{n}的交付说明"
+      })
+
+    %Rice.Tasks.Task{creator_id: creator.id}
+    |> Rice.Tasks.Task.create_changeset(attrs)
+    |> Repo.insert!()
+  end
+
   def authed(conn, token), do: Plug.Conn.put_req_header(conn, "authorization", "Bearer " <> token)
 
   def node_fixture(attrs \\ %{}) do

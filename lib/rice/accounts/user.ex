@@ -18,6 +18,7 @@ defmodule Rice.Accounts.User do
     field :bio, :string, default: ""
     field :grain_balance, :integer, default: 0
     field :node_member, :boolean, default: false
+    field :can_publish_tasks, :boolean, default: false
     field :disabled_at, :utc_datetime_usec
     field :deleted_at, :utc_datetime_usec
 
@@ -67,6 +68,7 @@ defmodule Rice.Accounts.User do
       :avatar_id,
       :grain_balance,
       :node_member,
+      :can_publish_tasks,
       :disabled_at,
       :deleted_at,
       :inserted_at,

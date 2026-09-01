@@ -22,6 +22,7 @@
   "avatar": { "id": "…", "url": "/api/attachments/…", "…": "…" },
   "grain_balance": 1200,
   "node_member": false,
+  "can_publish_tasks": false,
   "email": "alice@example.com",
   "phone": "13800000000",
   "phone_region": "86",
@@ -31,6 +32,9 @@
 
 别处出现的**别人**的用户对象是 `public` 视图 —— 少了 `email` / `phone` /
 `phone_region` / `grain_balance`。联系方式不外露。
+
+`can_publish_tasks` 是服务端管理的任务发布权限，只出现在用户自己的档案和后台用户
+对象中。普通用户默认是 `false`，不能通过 `PATCH /api/users/me` 自行开启。
 
 `avatar` 是附件对象或 `null`,形状见 [attachment_controller](attachment_controller.md#附件对象)。
 

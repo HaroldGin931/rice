@@ -8,7 +8,7 @@
 | --- | --- |
 | `user/page`、`node-user/page`、`user/search`、`search-by-name`、`unbound-node-user-search` | `GET /users` 一个带过滤的列表 |
 | `user/detail` | `GET /users/:id` |
-| `enable`、`disable`、`set-node-user`、`cancel-node-user` | `PATCH /users/:id` —— 同一行上的两个布尔位 |
+| `enable`、`disable`、`set-node-user`、`cancel-node-user` | `PATCH /users/:id` —— 复用同一管理入口；Task V1 另在这里增加 `can_publish_tasks` |
 
 共通约定见 [../README](../README.md)。
 
@@ -28,6 +28,7 @@
   "avatar": null,
   "grain_balance": 1200,
   "node_member": false,
+  "can_publish_tasks": false,
   "email": "alice@example.com",
   "phone": "13800000000",
   "phone_region": "86",
@@ -77,14 +78,15 @@
 
 ## `PATCH /api/admin/users/:id`
 
-改用户的两个管理位。
+改用户的三个管理位。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `disabled` | boolean | `true` 停用,`false` 恢复 |
 | `node_member` | boolean | 是否节点成员 |
+| `can_publish_tasks` | boolean | 是否允许在 C 端发布任务 |
 
-只接受这两个字段,其余一律忽略。两个都没传是 `422`。
+只接受这三个字段,其余一律忽略。三个都没传是 `422`。
 
 ### 停用会立刻生效
 
@@ -100,7 +102,7 @@ core 只改一个标记 —— 用户手上的 daoJwt 还能用满 30 天,等于
 | 状态码 | body |
 | --- | --- |
 | `404` | 用户不存在 |
-| `422` | `{"errors":{"detail":"没有可改的字段(只接受 disabled / node_member)"}}` |
+| `422` | `{"errors":{"detail":"没有可改的字段(只接受 disabled / node_member / can_publish_tasks)"}}` |
 
 某个用户的稻米明细见
 [grain_controller](grain_controller.md#get-apiadminusersuser_idgrain_transfers)。

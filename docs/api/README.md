@@ -28,6 +28,7 @@
 | [proposal](proposal_controller.md) | `ProposalController` | 提案 |
 | [proposal_vote](proposal_vote_controller.md) | `ProposalVoteController` | 投票 |
 | [proposal_comment](proposal_comment_controller.md) | `ProposalCommentController` | 提案评论 |
+| [task](task_controller.md) | `TaskController` | Task V1 发布、申请、任命、提交与审核 |
 
 ### 浏览器流程(不在 `/api` 下)
 
@@ -160,6 +161,7 @@ core 那套「HTTP 永远 200,靠信封里的 `code` 判断成败」在这里没
 | `401` | 没令牌 / 令牌无效或已撤销 |
 | `403` | 令牌有效但权限不够 |
 | `404` | 资源不存在(**或者不该让你知道它存在**) |
+| `409` | 资源状态已被其他请求推进，当前动作不能再执行 |
 | `422` | 参数校验没过 |
 | `429` | 触发频率限制(发码、试码) |
 | `502` | 依赖的外部服务(PDS、短信、贴文服务)出错 |

@@ -91,6 +91,10 @@ defmodule RiceWeb.Router do
     get "/proposals", ProposalController, :index
     get "/proposals/:id", ProposalController, :show
     get "/proposals/:proposal_id/comments", ProposalCommentController, :index
+
+    # Task V1。列表与详情公开可读，状态动作必须登录。
+    get "/tasks", TaskController, :index
+    get "/tasks/:id", TaskController, :show
   end
 
   # ── 管理端 ────────────────────────────────────────────────────────────
@@ -225,6 +229,16 @@ defmodule RiceWeb.Router do
     post "/proposals/:proposal_id/vote", ProposalVoteController, :create
     post "/proposals/:proposal_id/comments", ProposalCommentController, :create
     delete "/proposals/:proposal_id/comments/:id", ProposalCommentController, :delete
+
+    post "/tasks", TaskController, :create
+    post "/tasks/:task_id/applications", TaskController, :apply
+    post "/tasks/:task_id/applications/:application_id/appoint", TaskController, :appoint
+    post "/tasks/:task_id/submissions", TaskController, :submit
+    post "/tasks/:task_id/submissions/:submission_id/approve", TaskController, :approve
+
+    post "/tasks/:task_id/submissions/:submission_id/request_changes",
+         TaskController,
+         :request_changes
 
     # core 的 /file/upload 是匿名的;这里必须登录
     post "/attachments", AttachmentController, :create
