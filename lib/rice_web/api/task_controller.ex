@@ -14,7 +14,7 @@ defmodule RiceWeb.Api.TaskController do
   end
 
   def show(conn, %{"id" => id}) do
-    with {:ok, task} <- Tasks.fetch_task(id) do
+    with {:ok, task} <- Tasks.fetch_task(id, conn.assigns[:current_user]) do
       render(conn, :show, task: task, current_user: conn.assigns[:current_user])
     end
   end
@@ -27,25 +27,47 @@ defmodule RiceWeb.Api.TaskController do
     end
   end
 
+  def update(conn, %{"task_id" => task_id} = params) do
+    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
+         {:ok, task} <- Tasks.update_draft(conn.assigns.current_user, task, params) do
+      render(conn, :show, task: task, current_user: conn.assigns.current_user)
+    end
+  end
+
   def apply(conn, %{"task_id" => task_id} = params) do
-    with {:ok, task} <- Tasks.fetch_task(task_id),
+    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
          {:ok, _application} <- Tasks.apply(conn.assigns.current_user, task, params),
-         {:ok, task} <- Tasks.fetch_task(task.id) do
+         {:ok, task} <- Tasks.fetch_task(task.id, conn.assigns.current_user) do
       conn
       |> put_status(:created)
       |> render(:show, task: task, current_user: conn.assigns.current_user)
     end
   end
 
+  def publish(conn, %{"task_id" => task_id}) do
+    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
+         {:ok, task} <- Tasks.publish_draft(conn.assigns.current_user, task) do
+      render(conn, :show, task: task, current_user: conn.assigns.current_user)
+    end
+  end
+
+  def cancel(conn, %{"task_id" => task_id}) do
+    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
+         {:ok, task} <- Tasks.cancel(conn.assigns.current_user, task) do
+      render(conn, :show, task: task, current_user: conn.assigns.current_user)
+    end
+  end
+
   def appoint(conn, %{"task_id" => task_id, "application_id" => application_id}) do
-    with {:ok, task} <- Tasks.fetch_task(task_id),
-         {:ok, task} <- Tasks.appoint(conn.assigns.current_user, task, application_id) do
+    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
+         {:ok, task} <-
+           Tasks.appoint(conn.assigns.current_user, task, application_id, conn.params) do
       render(conn, :show, task: task, current_user: conn.assigns.current_user)
     end
   end
 
   def submit(conn, %{"task_id" => task_id} = params) do
-    with {:ok, task} <- Tasks.fetch_task(task_id),
+    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
          {:ok, task} <- Tasks.submit_result(conn.assigns.current_user, task, params) do
       conn
       |> put_status(:created)
@@ -54,7 +76,7 @@ defmodule RiceWeb.Api.TaskController do
   end
 
   def approve(conn, %{"task_id" => task_id, "submission_id" => submission_id}) do
-    with {:ok, task} <- Tasks.fetch_task(task_id),
+    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
          {:ok, task} <- Tasks.approve_result(conn.assigns.current_user, task, submission_id) do
       render(conn, :show, task: task, current_user: conn.assigns.current_user)
     end
@@ -64,7 +86,7 @@ defmodule RiceWeb.Api.TaskController do
         conn,
         %{"task_id" => task_id, "submission_id" => submission_id} = params
       ) do
-    with {:ok, task} <- Tasks.fetch_task(task_id),
+    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
          {:ok, task} <-
            Tasks.request_changes(
              conn.assigns.current_user,

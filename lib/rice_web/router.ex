@@ -231,6 +231,9 @@ defmodule RiceWeb.Router do
     delete "/proposals/:proposal_id/comments/:id", ProposalCommentController, :delete
 
     post "/tasks", TaskController, :create
+    patch "/tasks/:task_id", TaskController, :update
+    post "/tasks/:task_id/publish", TaskController, :publish
+    post "/tasks/:task_id/cancel", TaskController, :cancel
     post "/tasks/:task_id/applications", TaskController, :apply
     post "/tasks/:task_id/applications/:application_id/appoint", TaskController, :appoint
     post "/tasks/:task_id/submissions", TaskController, :submit

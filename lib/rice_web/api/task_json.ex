@@ -25,6 +25,9 @@ defmodule RiceWeb.Api.TaskJSON do
       status: task.status,
       creator: public_user(task.creator),
       assignee: public_user(task.assignee),
+      application_deadline: task.application_deadline,
+      appointed_at: task.appointed_at,
+      appointment_reason: task.appointment_reason,
       application_count: length(applications),
       my_application_status: my_application_status(task, applications, current_user),
       allowed_actions: allowed_actions(task, applications, current_user),
@@ -76,6 +79,7 @@ defmodule RiceWeb.Api.TaskJSON do
 
   defp allowed_actions(task, applications, %User{id: user_id}) do
     []
+    |> maybe_add(task.status == "draft" and task.creator_id == user_id, "publish")
     |> maybe_add(
       task.status == "open" and task.creator_id != user_id and
         not Enum.any?(applications, &(&1.user_id == user_id)),
@@ -86,6 +90,7 @@ defmodule RiceWeb.Api.TaskJSON do
         applications != [],
       "appoint"
     )
+    |> maybe_add(task.status == "open" and task.creator_id == user_id, "cancel")
     |> maybe_add(task.status == "in_progress" and task.assignee_id == user_id, "submit_result")
     |> maybe_add(task.status == "under_review" and task.creator_id == user_id, "approve_result")
     |> maybe_add(task.status == "under_review" and task.creator_id == user_id, "request_changes")

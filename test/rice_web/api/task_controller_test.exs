@@ -53,11 +53,15 @@ defmodule RiceWeb.Api.TaskControllerTest do
     appointed =
       build_conn()
       |> authed(publisher_token)
-      |> post(~p"/api/tasks/#{task_id}/applications/#{application_id}/appoint")
+      |> post(~p"/api/tasks/#{task_id}/applications/#{application_id}/appoint", %{
+        appointment_reason: "经验最匹配"
+      })
       |> json_response(200)
 
     assert appointed["data"]["status"] == "in_progress"
     assert appointed["data"]["assignee"]["id"] == worker.id
+    assert appointed["data"]["appointment_reason"] == "经验最匹配"
+    assert is_binary(appointed["data"]["appointed_at"])
     assert hd(appointed["data"]["applications"])["status"] == "appointed"
 
     assert %{"data" => []} =
@@ -133,5 +137,54 @@ defmodule RiceWeb.Api.TaskControllerTest do
            |> authed(publisher_token)
            |> post(~p"/api/tasks/#{task.id}/applications/#{application.id}/appoint")
            |> json_response(409)
+  end
+
+  test "草稿不公开，发布者可以发布或取消开放任务", %{conn: conn} do
+    publisher = task_publisher_fixture()
+    {:ok, token} = Rice.Accounts.issue_token(publisher)
+
+    draft =
+      conn
+      |> authed(token)
+      |> post(~p"/api/tasks", %{
+        title: "任务草稿",
+        description: "发布前不可见",
+        status: "draft"
+      })
+      |> json_response(201)
+
+    task_id = draft["data"]["id"]
+    assert draft["data"]["status"] == "draft"
+
+    assert %{"data" => []} = build_conn() |> get(~p"/api/tasks") |> json_response(200)
+    assert build_conn() |> get(~p"/api/tasks/#{task_id}") |> json_response(404)
+
+    updated =
+      build_conn()
+      |> authed(token)
+      |> patch(~p"/api/tasks/#{task_id}", %{
+        title: "更新后的任务草稿",
+        description: "继续编辑同一条草稿"
+      })
+      |> json_response(200)
+
+    assert updated["data"]["id"] == task_id
+    assert updated["data"]["title"] == "更新后的任务草稿"
+
+    published =
+      build_conn()
+      |> authed(token)
+      |> post(~p"/api/tasks/#{task_id}/publish")
+      |> json_response(200)
+
+    assert published["data"]["status"] == "open"
+
+    cancelled =
+      build_conn()
+      |> authed(token)
+      |> post(~p"/api/tasks/#{task_id}/cancel")
+      |> json_response(200)
+
+    assert cancelled["data"]["status"] == "cancelled"
   end
 end

@@ -16,9 +16,15 @@ defmodule Rice.TasksTest do
     assert [pending] = Tasks.list_tasks(worker, %{"mine" => "applied"}).entries
     assert pending.id == task.id
 
-    assert {:ok, task} = Tasks.appoint(publisher, task, application.id)
+    assert {:ok, task} =
+             Tasks.appoint(publisher, task, application.id, %{
+               appointment_reason: "相关经验最匹配"
+             })
+
     assert task.status == "in_progress"
     assert task.assignee_id == worker.id
+    assert task.appointment_reason == "相关经验最匹配"
+    assert %DateTime{} = task.appointed_at
     assert Tasks.list_tasks(worker, %{"mine" => "applied"}).entries == []
 
     assert [assigned] = Tasks.list_tasks(worker, %{"mine" => "assigned"}).entries
@@ -67,5 +73,70 @@ defmodule Rice.TasksTest do
 
     assert {:error, changeset} = Tasks.request_changes(publisher, task, submission.id, "   ")
     assert Map.has_key?(errors_on(changeset), :review_reason)
+  end
+
+  test "草稿只有发布者可见，发布后进入公开列表" do
+    publisher = task_publisher_fixture()
+    viewer = user_fixture()
+
+    assert {:ok, draft} =
+             Tasks.create_task(publisher, %{
+               title: "尚未发布",
+               description: "只对发布者可见",
+               status: "draft"
+             })
+
+    assert draft.status == "draft"
+    assert Tasks.list_tasks(nil).entries == []
+    assert {:error, :not_found} = Tasks.fetch_task(draft.id, viewer)
+    assert {:ok, _} = Tasks.fetch_task(draft.id, publisher)
+    assert [mine] = Tasks.list_tasks(publisher, %{"mine" => "created"}).entries
+    assert mine.id == draft.id
+
+    assert {:error, :forbidden} =
+             Tasks.update_draft(viewer, draft, %{title: "不该被修改"})
+
+    assert {:ok, updated} =
+             Tasks.update_draft(publisher, draft, %{
+               title: "更新后的草稿",
+               description: "仍然只对发布者可见"
+             })
+
+    assert updated.id == draft.id
+    assert updated.title == "更新后的草稿"
+
+    assert {:ok, published} = Tasks.publish_draft(publisher, updated)
+    assert published.status == "open"
+    assert [public] = Tasks.list_tasks(nil).entries
+    assert public.id == draft.id
+    assert {:error, :conflict} = Tasks.update_draft(publisher, published, %{title: "太晚了"})
+  end
+
+  test "发布者只能在任命前取消任务" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    task = task_fixture(publisher)
+
+    assert {:error, :forbidden} = Tasks.cancel(worker, task)
+    assert {:ok, cancelled} = Tasks.cancel(publisher, task)
+    assert cancelled.status == "cancelled"
+    assert {:error, :conflict} = Tasks.apply(worker, cancelled, %{})
+  end
+
+  test "领取截止后任务失效且不能继续申请" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    task = task_fixture(publisher)
+
+    task =
+      task
+      |> change(application_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+      |> Repo.update!()
+
+    assert %{expired: 1} = Tasks.expire_due_tasks()
+    assert {:ok, expired} = Tasks.fetch_task(task.id, worker)
+    assert expired.status == "expired"
+    assert {:error, :conflict} = Tasks.apply(worker, expired, %{})
+    assert :ok = Rice.Workers.ExpireTasks.perform(%Oban.Job{args: %{}})
   end
 end

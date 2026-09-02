@@ -1,6 +1,6 @@
 defmodule Rice.Tasks do
   @moduledoc """
-  Task V1：发布、申请领取、任命、提交结果、审核通过或驳回并留言。
+  Task V1：草稿、发布、申请领取、任命、取消、失效、提交与审核。
 
   稻米奖励与节点稻米池尚无已确认结算 API，因此不进入本状态机。
   """
@@ -12,8 +12,11 @@ defmodule Rice.Tasks do
   alias Rice.{Pagination, Repo}
 
   def list_tasks(user, params \\ %{}) do
+    expire_due_tasks()
+
     page =
       from(t in Task, as: :task)
+      |> scope_visibility(user, params["mine"])
       |> filter_status(params["status"])
       |> scope_mine(user, params["mine"])
       |> Pagination.paginate(Repo, Pagination.params(params))
@@ -21,7 +24,19 @@ defmodule Rice.Tasks do
     %{page | entries: preload_list(page.entries)}
   end
 
-  def fetch_task(id) do
+  def fetch_task(id, user \\ nil) do
+    expire_due_task(id)
+
+    with {:ok, task} <- fetch_task_record(id),
+         true <- visible_to?(task, user) do
+      {:ok, task}
+    else
+      false -> {:error, :not_found}
+      error -> error
+    end
+  end
+
+  defp fetch_task_record(id) do
     if Rice.Tsid.valid?(id) do
       case Repo.get(Task, id) do
         nil -> {:error, :not_found}
@@ -33,13 +48,73 @@ defmodule Rice.Tasks do
   end
 
   def create_task(%User{can_publish_tasks: true} = user, attrs) do
-    %Task{creator_id: user.id}
-    |> Task.create_changeset(attrs)
-    |> Repo.insert()
-    |> with_detail()
+    with {:ok, status} <- initial_status(attrs) do
+      %Task{creator_id: user.id, status: status}
+      |> Task.create_changeset(attrs)
+      |> Repo.insert()
+      |> with_detail()
+    end
   end
 
   def create_task(%User{}, _attrs), do: {:error, :forbidden}
+
+  def update_draft(
+        %User{id: creator_id},
+        %Task{creator_id: creator_id, status: "draft"} = task,
+        attrs
+      ) do
+    changeset = Task.create_changeset(task, attrs)
+
+    if changeset.valid? do
+      update_task(
+        from(t in Task, where: t.id == ^task.id and t.status == "draft"),
+        task.id,
+        title: Ecto.Changeset.get_field(changeset, :title),
+        description: Ecto.Changeset.get_field(changeset, :description),
+        application_deadline: Ecto.Changeset.get_field(changeset, :application_deadline)
+      )
+    else
+      {:error, changeset}
+    end
+  end
+
+  def update_draft(%User{id: creator_id}, %Task{creator_id: creator_id}, _attrs),
+    do: {:error, :conflict}
+
+  def update_draft(%User{}, %Task{}, _attrs), do: {:error, :forbidden}
+
+  def publish_draft(
+        %User{id: creator_id},
+        %Task{creator_id: creator_id, status: "draft"} = task
+      ) do
+    case Task.publish_changeset(task) do
+      %{valid?: true} ->
+        update_task(
+          from(t in Task, where: t.id == ^task.id and t.status == "draft"),
+          task.id,
+          status: "open"
+        )
+
+      changeset ->
+        {:error, changeset}
+    end
+  end
+
+  def publish_draft(%User{id: creator_id}, %Task{creator_id: creator_id}),
+    do: {:error, :conflict}
+
+  def publish_draft(%User{}, %Task{}), do: {:error, :forbidden}
+
+  def cancel(%User{id: creator_id}, %Task{creator_id: creator_id, status: "open"} = task) do
+    update_task(
+      from(t in Task, where: t.id == ^task.id and t.status == "open"),
+      task.id,
+      status: "cancelled"
+    )
+  end
+
+  def cancel(%User{id: creator_id}, %Task{creator_id: creator_id}), do: {:error, :conflict}
+  def cancel(%User{}, %Task{}), do: {:error, :forbidden}
 
   def apply(%User{id: user_id}, %Task{creator_id: user_id}, _attrs),
     do: {:error, :forbidden}
@@ -56,30 +131,44 @@ defmodule Rice.Tasks do
 
   def apply(%User{}, %Task{}, _attrs), do: {:error, :conflict}
 
-  def appoint(user, %Task{} = task, application_id) do
+  def appoint(user, %Task{} = task, application_id, attrs \\ %{}) do
     with {:ok, application} <- fetch_record(Application, task.id, application_id) do
-      appoint_application(user, task, application)
+      appoint_application(user, task, application, attrs)
     end
   end
 
   defp appoint_application(
          %User{id: creator_id},
          %Task{creator_id: creator_id, status: "open"} = task,
-         %Application{task_id: task_id} = application
+         %Application{task_id: task_id} = application,
+         attrs
        )
        when task_id == task.id do
-    update_task(
-      from(t in Task, where: t.id == ^task.id and t.status == "open"),
-      task.id,
-      status: "in_progress",
-      assignee_id: application.user_id
-    )
+    changeset = Task.appointment_changeset(task, attrs)
+
+    if changeset.valid? do
+      update_task(
+        from(t in Task, where: t.id == ^task.id and t.status == "open"),
+        task.id,
+        status: "in_progress",
+        assignee_id: application.user_id,
+        appointed_at: DateTime.utc_now(),
+        appointment_reason: Ecto.Changeset.get_field(changeset, :appointment_reason)
+      )
+    else
+      {:error, changeset}
+    end
   end
 
-  defp appoint_application(%User{id: creator_id}, %Task{creator_id: creator_id}, %Application{}),
-    do: {:error, :conflict}
+  defp appoint_application(
+         %User{id: creator_id},
+         %Task{creator_id: creator_id},
+         %Application{},
+         _attrs
+       ),
+       do: {:error, :conflict}
 
-  defp appoint_application(%User{}, %Task{}, %Application{}), do: {:error, :forbidden}
+  defp appoint_application(%User{}, %Task{}, %Application{}, _attrs), do: {:error, :forbidden}
 
   def submit_result(
         %User{id: user_id},
@@ -182,8 +271,41 @@ defmodule Rice.Tasks do
   defp request_submission_changes(%User{}, %Task{}, %Submission{}, _),
     do: {:error, :forbidden}
 
-  defp filter_status(query, status) when status in ~w(open in_progress under_review completed),
-    do: from(t in query, where: t.status == ^status)
+  def expire_due_tasks(now \\ DateTime.utc_now()) do
+    {expired, _} =
+      Repo.update_all(
+        from(t in Task,
+          where:
+            t.status == "open" and not is_nil(t.application_deadline) and
+              t.application_deadline <= ^now
+        ),
+        set: [status: "expired", updated_at: now]
+      )
+
+    %{expired: expired}
+  end
+
+  defp initial_status(attrs) do
+    case attrs["status"] || attrs[:status] do
+      nil -> {:ok, "open"}
+      "draft" -> {:ok, "draft"}
+      "open" -> {:ok, "open"}
+      _ -> {:error, :unprocessable_entity}
+    end
+  end
+
+  defp visible_to?(%Task{status: "draft", creator_id: creator_id}, %User{id: creator_id}),
+    do: true
+
+  defp visible_to?(%Task{status: "draft"}, _user), do: false
+  defp visible_to?(%Task{}, _user), do: true
+
+  defp scope_visibility(query, %User{}, "created"), do: query
+  defp scope_visibility(query, _user, _mine), do: from(t in query, where: t.status != "draft")
+
+  defp filter_status(query, status)
+       when status in ~w(draft open in_progress under_review completed expired cancelled),
+       do: from(t in query, where: t.status == ^status)
 
   defp filter_status(query, _), do: query
 
@@ -203,7 +325,25 @@ defmodule Rice.Tasks do
     from(t in query, where: t.status == "open" and exists(application))
   end
 
+  defp scope_mine(query, nil, mine) when mine in ~w(created assigned applied),
+    do: from(t in query, where: false)
+
   defp scope_mine(query, _user, _mine), do: query
+
+  defp expire_due_task(id) do
+    if Rice.Tsid.valid?(id) do
+      now = DateTime.utc_now()
+
+      Repo.update_all(
+        from(t in Task,
+          where:
+            t.id == ^id and t.status == "open" and not is_nil(t.application_deadline) and
+              t.application_deadline <= ^now
+        ),
+        set: [status: "expired", updated_at: now]
+      )
+    end
+  end
 
   defp conditional_update(repo, query, updates) do
     case repo.update_all(query, set: updates) do
@@ -218,7 +358,7 @@ defmodule Rice.Tasks do
            query,
            Keyword.put(updates, :updated_at, DateTime.utc_now())
          ) do
-      {:ok, _} -> fetch_task(task_id)
+      {:ok, _} -> fetch_task_record(task_id)
       error -> error
     end
   end
@@ -234,7 +374,7 @@ defmodule Rice.Tasks do
     end
   end
 
-  defp transaction_task({:ok, _changes}, task_id), do: fetch_task(task_id)
+  defp transaction_task({:ok, _changes}, task_id), do: fetch_task_record(task_id)
   defp transaction_task({:error, _step, reason, _changes}, _task_id), do: {:error, reason}
 
   defp with_detail({:ok, task}), do: {:ok, preload_detail(task)}
