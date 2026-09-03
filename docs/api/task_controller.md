@@ -1,16 +1,17 @@
 # TaskController
 
-Task V1。读取权威是 Rice 数据库，不绕 PDS、Relay 或 AppView。
+Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不绕 PDS、Relay 或 AppView。
 
 这一版实现：单份草稿、发布、申请领取、发布者从申请人中任命、任命前取消、领取截止
 后失效、承作人提交结果、发布者认可结果，或「不认可结果并说明理由」后由同一承作人重新提交。
 任务详情公开返回状态变化记录；申请、任命、取消、失效、提交与审核同时产生 Rice 站内通知。
 
 **不实现**指定用户邀约、协作人、执行进度、监督人、争议协调、任务附件、任命后的取消/
-退出/延期、稻米结算和写入 PDS。这些能力不属于 Task V1。
+退出/延期、节点稻米池和写入 PDS。这些能力不属于当前范围。
 
-节点稻米池与任务奖励的 API/口径尚未确认：响应没有奖励字段，结果被认可后直接完成，
-不会冻结、划转或生成流水。
+任务奖励由发布者自己的可用稻米承担。任务发布时冻结；结果被认可时发给承作人并生成
+`task_reward` 流水；任务在任命前取消或失效时退回发布者。节点稻米池仍固定为 `0`，
+不参与当前结算。
 
 共通约定见 [README](README.md)。
 
@@ -41,6 +42,9 @@ Task V1。读取权威是 Rice 数据库，不绕 PDS、Relay 或 AppView。
   "application_deadline": "2026-09-10T12:00:00Z",
   "appointed_at": null,
   "appointment_reason": null,
+  "published_at": "2026-09-03T14:45:56Z",
+  "reward_amount": 120,
+  "reward_status": "reserved",
   "application_count": 1,
   "my_application_status": null,
   "allowed_actions": ["apply"],
@@ -51,6 +55,12 @@ Task V1。读取权威是 Rice 数据库，不绕 PDS、Relay 或 AppView。
   "updated_at": "…"
 }
 ```
+
+`reward_status` 为 `none|reserved|settled|refunded`：草稿或零奖励任务是 `none`；发布后的
+正数奖励是 `reserved`；认可结果后是 `settled`；取消或失效后是 `refunded`。
+
+`published_at` 取任务第一次进入 `open` 的状态事件时间；草稿为 `null`。`inserted_at`
+仍表示任务或草稿最初创建的时间。
 
 `allowed_actions` 是服务端根据当前用户和状态计算的，可包含 `publish`、`apply`、
 `appoint`、`cancel`、`submit_result`、`approve_result`、`request_changes`。未登录时为空数组。
@@ -80,26 +90,30 @@ Task V1。读取权威是 Rice 数据库，不绕 PDS、Relay 或 AppView。
   "title":"整理村史访谈",
   "description":"完成访谈文字稿并校对",
   "status":"open",
-  "application_deadline":"2026-09-10T12:00:00Z"
+  "application_deadline":"2026-09-10T12:00:00Z",
+  "reward_amount":120
 }
 ```
 
 `status` 只接受创建语义中的 `draft` 或 `open`；省略时为 `open`。每位发布者最多保留
-一份 `draft`。领取截止可选，但填写时必须在将来。成功 `201`，没有权限 `403`。
+一份 `draft`。领取截止可选，但填写时必须在将来。`reward_amount` 是非负整数；正数奖励在
+创建公开任务时立即冻结，余额不足返回 `422` 且任务不会创建。成功 `201`，没有权限 `403`。
 
 ### `PATCH /api/tasks/:task_id`
 
 仅发布者可以修改自己的 `draft`。请求字段与创建任务相同，但不接收 `status`。前端读取
-唯一草稿后直接继续编辑同一条任务，不会复制出第二条草稿。草稿一旦发布，继续修改返回
-`409`。
+唯一草稿后直接继续编辑同一条任务，不会复制出第二条草稿；草稿阶段修改奖励不会冻结。
+草稿一旦发布，继续修改返回 `409`。
 
 ### `POST /api/tasks/:task_id/publish`
 
-仅发布者可以把自己的 `draft` 发布为 `open`。如果领取截止已经过去，返回 `422`。
+仅发布者可以把自己的 `draft` 发布为 `open`。正数奖励在同一事务里冻结；余额不足或领取
+截止已经过去返回 `422`，任务仍保持草稿。
 
 ### `POST /api/tasks/:task_id/cancel`
 
-仅发布者可在 `open`、尚未任命时取消。成功后进入 `cancelled`；任命后返回 `409`。
+仅发布者可在 `open`、尚未任命时取消。成功后进入 `cancelled`，冻结奖励在同一事务退回；
+任命后返回 `409`。
 
 ### `POST /api/tasks/:task_id/applications`
 
@@ -132,8 +146,8 @@ Task V1。读取权威是 Rice 数据库，不绕 PDS、Relay 或 AppView。
 
 ### `POST /api/tasks/:task_id/submissions/:submission_id/approve`
 
-仅发布者可审核当前待审提交。成功后直接进入 `completed`；完成时间使用任务自身的
-`updated_at`，这一版没有独立结算步骤。
+仅发布者可审核当前待审提交。成功后在同一事务中进入 `completed`、释放发布者冻结余额、
+给承作人入账并写入 `task_reward` 流水。重复审核由状态条件更新拦截，不会重复发放。
 
 ### `POST /api/tasks/:task_id/submissions/:submission_id/request_changes`
 
@@ -149,7 +163,7 @@ Task V1。读取权威是 Rice 数据库，不绕 PDS、Relay 或 AppView。
 
 `application_deadline` 到期且任务仍为 `open` 时进入 `expired`。Oban 每分钟执行一次；
 列表或详情读取也会幂等补偿一次，因此后台任务暂时关闭的本地环境不会继续接受过期申请。
-所有申请人会收到 `task_expired` 通知，任务仍保留在各自申请历史中。
+冻结奖励会退回发布者；所有申请人会收到 `task_expired` 通知，任务仍保留在各自申请历史中。
 
 ## 任务通知
 

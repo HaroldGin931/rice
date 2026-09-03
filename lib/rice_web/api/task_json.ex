@@ -44,12 +44,15 @@ defmodule RiceWeb.Api.TaskJSON do
       application_deadline: task.application_deadline,
       appointed_at: task.appointed_at,
       appointment_reason: task.appointment_reason,
+      reward_amount: task.reward_amount,
+      reward_status: task.reward_status,
       application_count: length(applications),
       my_application_status: my_application_status(task, applications, current_user),
       allowed_actions: allowed_actions(task, applications, current_user),
       applications: visible_applications(task, applications, current_user, detail?),
       submissions: visible_submissions(task, submissions, current_user, detail?),
       events: if(detail?, do: Enum.map(events, &event/1), else: nil),
+      published_at: published_at(task, events),
       inserted_at: task.inserted_at,
       updated_at: task.updated_at
     }
@@ -151,6 +154,15 @@ defmodule RiceWeb.Api.TaskJSON do
 
   defp loaded(%Ecto.Association.NotLoaded{}), do: []
   defp loaded(items) when is_list(items), do: items
+
+  defp published_at(%{status: "draft"}, _events), do: nil
+
+  defp published_at(task, events) do
+    case Enum.find(events, &(&1.to_status == "open" and &1.detail != "状态记录从这里开始")) do
+      nil -> task.inserted_at
+      event -> event.inserted_at
+    end
+  end
 
   defp public_user(nil), do: nil
   defp public_user(%Ecto.Association.NotLoaded{}), do: nil

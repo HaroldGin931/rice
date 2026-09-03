@@ -73,6 +73,57 @@ defmodule Rice.Grains do
     end
   end
 
+  @doc "在调用方事务中把任务奖励从可用余额移到冻结余额。"
+  def reserve_task_reward(repo, user_id, amount) when is_integer(amount) and amount > 0 do
+    {count, _} =
+      repo.update_all(
+        from(u in User, where: u.id == ^user_id and u.grain_balance >= ^amount),
+        inc: [grain_balance: -amount, grain_frozen_balance: amount]
+      )
+
+    if count == 1, do: {:ok, :reserved}, else: {:error, :insufficient_balance}
+  end
+
+  @doc "在调用方事务中把已冻结的任务奖励退回发布者可用余额。"
+  def refund_task_reward(repo, user_id, amount) when is_integer(amount) and amount > 0 do
+    {count, _} =
+      repo.update_all(
+        from(u in User, where: u.id == ^user_id and u.grain_frozen_balance >= ^amount),
+        inc: [grain_balance: amount, grain_frozen_balance: -amount]
+      )
+
+    if count == 1, do: {:ok, :refunded}, else: {:error, :grain_reservation_missing}
+  end
+
+  @doc "在调用方事务中释放冻结奖励、给承作人入账并写入任务奖励流水。"
+  def settle_task_reward(repo, from_id, to_id, task_id, amount)
+      when is_integer(amount) and amount > 0 do
+    attrs = %{
+      kind: "task_reward",
+      from_user_id: from_id,
+      to_user_id: to_id,
+      amount: amount,
+      memo: "任务完成奖励",
+      subject_uri: "rice://tasks/#{task_id}"
+    }
+
+    with {1, _} <-
+           repo.update_all(
+             from(u in User, where: u.id == ^from_id and u.grain_frozen_balance >= ^amount),
+             inc: [grain_frozen_balance: -amount]
+           ),
+         {1, _} <-
+           repo.update_all(from(u in User, where: u.id == ^to_id),
+             inc: [grain_balance: amount]
+           ),
+         {:ok, transfer} <- repo.insert(Transfer.changeset(%Transfer{}, attrs)) do
+      {:ok, transfer}
+    else
+      {0, _} -> {:error, :grain_reservation_missing}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   # 这一条 SQL 就是全部的并发控制。`grain_balance >= amount` 让扣款和余额检查
   # 在同一个原子操作里完成,不存在"查完到扣之间被插一脚"的窗口。
   defp debit(repo, user_id, amount) do
@@ -175,7 +226,7 @@ defmodule Rice.Grains do
     |> Pagination.paginate(Repo, Pagination.params(params))
   end
 
-  @doc "对账用:全站余额之和应当等于发放总额(reward/gift 是零和的内部转移)。"
+  @doc "对账用:全站可用与冻结余额之和应当等于发放总额。"
   def reconcile do
     balances =
       Repo.one(
@@ -185,12 +236,20 @@ defmodule Rice.Grains do
     granted =
       Repo.one(from t in Transfer, where: t.kind == "grant", select: coalesce(sum(t.amount), 0))
 
+    frozen =
+      Repo.one(
+        from u in User,
+          where: is_nil(u.deleted_at),
+          select: coalesce(sum(u.grain_frozen_balance), 0)
+      )
+
     # Postgres 对 bigint 求和返回 numeric,Ecto 映射成 Decimal。
     # 对账数字是整数,直接转回来,免得调用方到处判类型。
     balances = to_integer(balances)
     granted = to_integer(granted)
+    frozen = to_integer(frozen)
 
-    %{balances: balances, granted: granted, ok?: balances == granted}
+    %{balances: balances, frozen: frozen, granted: granted, ok?: balances + frozen == granted}
   end
 
   defp to_integer(%Decimal{} = d), do: Decimal.to_integer(d)

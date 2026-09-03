@@ -38,6 +38,18 @@ defmodule RiceWeb.Api.FallbackController do
     |> json(%{errors: %{detail: "资源状态已经变化，请刷新后重试"}})
   end
 
+  def call(conn, {:error, :insufficient_balance}) do
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{errors: %{amount: ["可用稻米不足"]}})
+  end
+
+  def call(conn, {:error, :grain_reservation_missing}) do
+    conn
+    |> put_status(:conflict)
+    |> json(%{errors: %{detail: "任务奖励冻结状态异常，请刷新后重试"}})
+  end
+
   def call(conn, {:error, reason})
       when reason in [
              :invalid_ticket,

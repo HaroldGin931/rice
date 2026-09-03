@@ -1,15 +1,16 @@
 defmodule Rice.Tasks do
   @moduledoc """
-  Task V1：草稿、发布、申请领取、任命、取消、失效、提交与审核。
+  任务状态机：草稿、发布、申请领取、任命、取消、失效、提交与审核。
 
-  稻米奖励与节点稻米池尚无已确认结算 API，因此不进入本状态机。
+  任务奖励由发布者的 Rice 可用余额冻结；完成时发给承作人，取消或失效时退回。
+  节点稻米池不参与这条链路。
   """
   import Ecto.Query
 
   alias Ecto.Multi
   alias Rice.Accounts.User
   alias Rice.Tasks.{Application, Event, Notification, Submission, Task}
-  alias Rice.{Pagination, Repo}
+  alias Rice.{Grains, Pagination, Repo}
 
   def list_tasks(user, params \\ %{}) do
     expire_due_tasks()
@@ -55,10 +56,25 @@ defmodule Rice.Tasks do
         %Task{creator_id: user.id, status: status}
         |> Task.create_changeset(attrs)
 
+      reward_amount = Ecto.Changeset.get_field(task_changeset, :reward_amount) || 0
+
+      task_changeset =
+        Ecto.Changeset.put_change(
+          task_changeset,
+          :reward_status,
+          if(status == "open" and reward_amount > 0, do: "reserved", else: "none")
+        )
+
       Multi.new()
       |> Multi.insert(:task, task_changeset)
+      |> maybe_run_reward(
+        if status == "open" and reward_amount > 0 do
+          fn repo, _changes -> Grains.reserve_task_reward(repo, user.id, reward_amount) end
+        end
+      )
       |> Multi.insert(:event, fn %{task: task} ->
-        event_changeset(task.id, user.id, nil, status)
+        detail = if status == "open", do: reward_detail(task, :reserved)
+        event_changeset(task.id, user.id, nil, status, detail)
       end)
       |> Repo.transaction()
       |> case do
@@ -83,7 +99,8 @@ defmodule Rice.Tasks do
         task.id,
         title: Ecto.Changeset.get_field(changeset, :title),
         description: Ecto.Changeset.get_field(changeset, :description),
-        application_deadline: Ecto.Changeset.get_field(changeset, :application_deadline)
+        application_deadline: Ecto.Changeset.get_field(changeset, :application_deadline),
+        reward_amount: Ecto.Changeset.get_field(changeset, :reward_amount)
       )
     else
       {:error, changeset}
@@ -101,11 +118,16 @@ defmodule Rice.Tasks do
       ) do
     case Task.publish_changeset(task) do
       %{valid?: true} ->
+        {updates, detail, reward_step} = reserve_reward(task)
+
         transition_task(
           from(t in Task, where: t.id == ^task.id and t.status == "draft"),
           task,
-          [status: "open"],
-          creator_id
+          updates,
+          creator_id,
+          detail,
+          [],
+          reward_step
         )
 
       changeset ->
@@ -119,6 +141,8 @@ defmodule Rice.Tasks do
   def publish_draft(%User{}, %Task{}), do: {:error, :forbidden}
 
   def cancel(%User{id: creator_id}, %Task{creator_id: creator_id, status: "open"} = task) do
+    {updates, detail, reward_step} = refund_reward(task, "cancelled")
+
     notifications =
       fn repo ->
         Enum.map(applicant_ids(repo, task.id), &{&1, creator_id, "task_cancelled", nil})
@@ -127,10 +151,11 @@ defmodule Rice.Tasks do
     transition_task(
       from(t in Task, where: t.id == ^task.id and t.status == "open"),
       task,
-      [status: "cancelled"],
+      updates,
       creator_id,
-      nil,
-      notifications
+      detail,
+      notifications,
+      reward_step
     )
   end
 
@@ -278,13 +303,16 @@ defmodule Rice.Tasks do
          %Submission{task_id: task_id, review_reason: nil} = submission
        )
        when task_id == task.id do
+    {updates, detail, reward_step} = settle_reward(task, submission.user_id)
+
     transition_task(
       from(t in Task, where: t.id == ^task.id and t.status == "under_review"),
       task,
-      [status: "completed"],
+      updates,
       creator_id,
-      nil,
-      [{submission.user_id, creator_id, "result_approved", nil}]
+      detail,
+      [{submission.user_id, creator_id, "result_approved", detail}],
+      reward_step
     )
   end
 
@@ -481,38 +509,32 @@ defmodule Rice.Tasks do
   defp expire_tasks(query, now) do
     {:ok, expired} =
       Repo.transaction(fn ->
-        {count, tasks} =
-          query
-          |> select([t], {t.id, t.creator_id})
-          |> Repo.update_all(set: [status: "expired", updated_at: now])
+        tasks = query |> lock("FOR UPDATE SKIP LOCKED") |> Repo.all()
 
-        creators = Map.new(tasks)
-        task_ids = Map.keys(creators)
+        Enum.each(tasks, fn task ->
+          {updates, detail, reward_step} = refund_reward(task, "expired")
 
-        Enum.each(tasks, fn {task_id, _creator_id} ->
-          event_changeset(task_id, nil, "open", "expired") |> Repo.insert!()
-        end)
-
-        if task_ids != [] do
-          from(a in Application,
-            where: a.task_id in ^task_ids,
-            select: {a.task_id, a.user_id}
-          )
-          |> Repo.all()
-          |> Enum.each(fn {task_id, recipient_id} ->
-            task = %Task{id: task_id}
-
-            notification_changeset(
-              task,
-              recipient_id,
-              Map.fetch!(creators, task_id),
-              "task_expired"
+          {:ok, :updated} =
+            conditional_update(
+              Repo,
+              from(t in Task, where: t.id == ^task.id and t.status == "open"),
+              Keyword.put(updates, :updated_at, now)
             )
+
+          if reward_step do
+            {:ok, :refunded} = reward_step.(Repo, %{})
+          end
+
+          event_changeset(task.id, nil, "open", "expired", detail) |> Repo.insert!()
+
+          applicant_ids(Repo, task.id)
+          |> Enum.each(fn recipient_id ->
+            notification_changeset(task, recipient_id, task.creator_id, "task_expired", detail)
             |> Repo.insert!()
           end)
-        end
+        end)
 
-        count
+        length(tasks)
       end)
 
     expired
@@ -536,7 +558,11 @@ defmodule Rice.Tasks do
     end
   end
 
-  defp transition_task(query, task, updates, actor_id, detail \\ nil, notifications \\ []) do
+  defp transition_task(query, task, updates, actor_id, detail, notifications) do
+    transition_task(query, task, updates, actor_id, detail, notifications, nil)
+  end
+
+  defp transition_task(query, task, updates, actor_id, detail, notifications, reward_step) do
     now = DateTime.utc_now()
 
     multi =
@@ -544,6 +570,7 @@ defmodule Rice.Tasks do
       |> Multi.run(:task, fn repo, _ ->
         conditional_update(repo, query, Keyword.put(updates, :updated_at, now))
       end)
+      |> maybe_run_reward(reward_step)
       |> Multi.insert(
         :event,
         event_changeset(task.id, actor_id, task.status, Keyword.fetch!(updates, :status), detail)
@@ -557,6 +584,59 @@ defmodule Rice.Tasks do
     |> Repo.transaction()
     |> transaction_task(task.id)
   end
+
+  defp maybe_run_reward(multi, nil), do: multi
+
+  defp maybe_run_reward(multi, reward_step) do
+    Multi.run(multi, :task_reward, reward_step)
+  end
+
+  defp reserve_reward(%Task{reward_amount: amount} = task) when amount > 0 do
+    {
+      [status: "open", reward_status: "reserved"],
+      reward_detail(task, :reserved),
+      fn repo, _changes -> Grains.reserve_task_reward(repo, task.creator_id, amount) end
+    }
+  end
+
+  defp reserve_reward(_task), do: {[status: "open"], nil, nil}
+
+  defp refund_reward(%Task{reward_status: "reserved", reward_amount: amount} = task, status)
+       when amount > 0 do
+    {
+      [status: status, reward_status: "refunded"],
+      reward_detail(task, :refunded),
+      fn repo, _changes -> Grains.refund_task_reward(repo, task.creator_id, amount) end
+    }
+  end
+
+  defp refund_reward(_task, status), do: {[status: status], nil, nil}
+
+  defp settle_reward(
+         %Task{reward_status: "reserved", reward_amount: amount} = task,
+         assignee_id
+       )
+       when amount > 0 do
+    {
+      [status: "completed", reward_status: "settled"],
+      reward_detail(task, :settled),
+      fn repo, _changes ->
+        Grains.settle_task_reward(repo, task.creator_id, assignee_id, task.id, amount)
+      end
+    }
+  end
+
+  defp settle_reward(_task, _assignee_id), do: {[status: "completed"], nil, nil}
+
+  defp reward_detail(%Task{reward_amount: amount}, action) when amount > 0 do
+    case action do
+      :reserved -> "已冻结 #{amount} 稻米作为任务奖励"
+      :settled -> "已向承作人发放 #{amount} 稻米"
+      :refunded -> "已向发布者退回 #{amount} 稻米"
+    end
+  end
+
+  defp reward_detail(_task, _action), do: nil
 
   defp notification_rows(builder, repo) when is_function(builder, 1), do: builder.(repo)
   defp notification_rows(rows, _repo), do: rows
@@ -634,7 +714,12 @@ defmodule Rice.Tasks do
   defp transaction_task({:error, _step, reason, _changes}, _task_id), do: {:error, reason}
 
   defp preload_list(tasks) do
-    Repo.preload(tasks, creator: :avatar, assignee: :avatar, applications: [])
+    Repo.preload(tasks,
+      creator: :avatar,
+      assignee: :avatar,
+      applications: [],
+      events: from(e in Event, where: e.to_status == "open", order_by: [asc: e.id])
+    )
   end
 
   defp preload_detail(task) do

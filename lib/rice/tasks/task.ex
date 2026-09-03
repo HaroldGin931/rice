@@ -1,5 +1,5 @@
 defmodule Rice.Tasks.Task do
-  @moduledoc "Task V1 的任务主体。奖励与结算不在这一版状态机里。"
+  @moduledoc "任务主体；奖励由发布者余额冻结，并在结果认可后发放。"
   use Rice.Schema
 
   @statuses ~w(draft open in_progress under_review completed expired cancelled)
@@ -11,6 +11,8 @@ defmodule Rice.Tasks.Task do
     field(:application_deadline, :utc_datetime_usec)
     field(:appointed_at, :utc_datetime_usec)
     field(:appointment_reason, :string)
+    field(:reward_amount, :integer, default: 0)
+    field(:reward_status, :string, default: "none")
 
     belongs_to(:creator, Rice.Accounts.User)
     belongs_to(:assignee, Rice.Accounts.User)
@@ -24,12 +26,13 @@ defmodule Rice.Tasks.Task do
   @doc "发布者只能提交任务内容；身份与状态由服务端填写。"
   def create_changeset(task, attrs) do
     task
-    |> cast(attrs, [:title, :description, :application_deadline])
+    |> cast(attrs, [:title, :description, :application_deadline, :reward_amount])
     |> validate_required([:title, :description])
     |> update_change(:title, &trim/1)
     |> update_change(:description, &trim/1)
     |> validate_length(:title, min: 1, max: 128)
     |> validate_length(:description, min: 1, max: 4000)
+    |> validate_number(:reward_amount, greater_than_or_equal_to: 0)
     |> validate_future_deadline()
     |> unique_constraint(:creator_id, name: :tasks_one_draft_per_creator)
   end

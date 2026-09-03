@@ -16,6 +16,7 @@ defmodule RiceWeb.Api.UserControllerTest do
       assert data["email"] == "a@example.com"
       assert data["phone"] == "13800000000"
       assert data["grain_balance"] == 0
+      assert data["grain_frozen_balance"] == 0
       assert data["node_member"] == false
     end
 

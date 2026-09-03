@@ -6,10 +6,11 @@ defmodule Rice.Grains.Transfer do
     * `reward` 打赏 —— 对着某条帖子
     * `gift`   赠送 —— 点对点
     * `grant`  后台发放 —— 增发,`from_user_id` 为 NULL
+    * `task_reward` 任务完成后发放 —— 只能由 Task 状态机写入
   """
   use Rice.Schema
 
-  @kinds ~w(reward gift grant)
+  @kinds ~w(reward gift grant task_reward)
 
   schema "grain_transfers" do
     field :legacy_id, :string
@@ -59,7 +60,7 @@ defmodule Rice.Grains.Transfer do
       kind == "grant" and not is_nil(from) ->
         add_error(changeset, :from_user_id, "后台发放不应有付款方")
 
-      kind in ~w(reward gift) and is_nil(from) ->
+      kind in ~w(reward gift task_reward) and is_nil(from) ->
         add_error(changeset, :from_user_id, "缺少付款方")
 
       true ->

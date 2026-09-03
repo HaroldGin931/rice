@@ -21,6 +21,7 @@
   "bio": "…",
   "avatar": { "id": "…", "url": "/api/attachments/…", "…": "…" },
   "grain_balance": 1200,
+  "grain_frozen_balance": 80,
   "node_member": false,
   "can_publish_tasks": false,
   "email": "alice@example.com",
@@ -31,7 +32,10 @@
 ```
 
 别处出现的**别人**的用户对象是 `public` 视图 —— 少了 `email` / `phone` /
-`phone_region` / `grain_balance`。联系方式不外露。
+`phone_region` / `grain_balance` / `grain_frozen_balance`。联系方式和余额不外露。
+
+`grain_balance` 是可用稻米，`grain_frozen_balance` 是已为任务奖励冻结、尚未结算或
+退回的稻米。
 
 `can_publish_tasks` 是服务端管理的任务发布权限，只出现在用户自己的档案和后台用户
 对象中。普通用户默认是 `false`，不能通过 `PATCH /api/users/me` 自行开启。
@@ -59,7 +63,7 @@
 | `avatar_id` | string | 附件 id |
 
 只改传了的字段。改不了联系方式(那要验证码,见下面两个接口),也改不了
-`handle` / `did` / `grain_balance`。
+`handle` / `did` / `grain_balance` / `grain_frozen_balance`。
 
 响应 `200`,`data` 是更新后的用户对象。校验失败 `422`。
 

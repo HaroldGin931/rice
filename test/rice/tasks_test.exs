@@ -3,6 +3,88 @@ defmodule Rice.TasksTest do
 
   alias Rice.Tasks
 
+  test "任务奖励在发布时冻结，在认可结果时发给承作人" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    {:ok, _} = Rice.Grains.grant(publisher, 300, memo: "测试初始稻米")
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "有奖励的任务",
+               description: "完成后发放",
+               reward_amount: 120
+             })
+
+    assert task.reward_status == "reserved"
+
+    assert %{grain_balance: 180, grain_frozen_balance: 120} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+
+    assert {:ok, application} = Tasks.apply(worker, task, %{})
+    assert {:ok, task} = Tasks.appoint(publisher, task, application.id)
+    assert {:ok, task} = Tasks.submit_result(worker, task, %{body: "已完成"})
+    submission = Enum.find(task.submissions, &is_nil(&1.review_reason))
+    assert {:ok, completed} = Tasks.approve_result(publisher, task, submission.id)
+
+    assert completed.reward_status == "settled"
+
+    assert %{grain_balance: 180, grain_frozen_balance: 0} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+
+    assert %{grain_balance: 120} = Repo.get!(Rice.Accounts.User, worker.id)
+
+    assert %{kind: "task_reward", amount: 120, subject_uri: subject_uri} =
+             Repo.one!(from(t in Rice.Grains.Transfer, where: t.kind == "task_reward"))
+
+    assert subject_uri == "rice://tasks/#{task.id}"
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "草稿不冻结，发布时才冻结；取消后自动退回" do
+    publisher = task_publisher_fixture()
+    {:ok, _} = Rice.Grains.grant(publisher, 200)
+
+    assert {:ok, draft} =
+             Tasks.create_task(publisher, %{
+               title: "奖励草稿",
+               description: "发布后冻结",
+               status: "draft",
+               reward_amount: 80
+             })
+
+    assert draft.reward_status == "none"
+
+    assert %{grain_balance: 200, grain_frozen_balance: 0} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+
+    assert {:ok, task} = Tasks.publish_draft(publisher, draft)
+    assert task.reward_status == "reserved"
+
+    assert %{grain_balance: 120, grain_frozen_balance: 80} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+
+    assert {:ok, cancelled} = Tasks.cancel(publisher, task)
+    assert cancelled.reward_status == "refunded"
+
+    assert %{grain_balance: 200, grain_frozen_balance: 0} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "余额不足时任务发布与冻结一起回滚" do
+    publisher = task_publisher_fixture()
+
+    assert {:error, :insufficient_balance} =
+             Tasks.create_task(publisher, %{
+               title: "余额不足",
+               description: "不能公开",
+               reward_amount: 1
+             })
+
+    assert Repo.aggregate(Rice.Tasks.Task, :count) == 0
+  end
+
   test "完整状态机保留驳回原因与承作人的完成历史" do
     publisher = task_publisher_fixture()
     worker = user_fixture()
@@ -252,6 +334,28 @@ defmodule Rice.TasksTest do
     assert [history] = Tasks.list_tasks(worker, %{"mine" => "applied"}).entries
     assert history.id == task.id
     assert :ok = Rice.Workers.ExpireTasks.perform(%Oban.Job{args: %{}})
+  end
+
+  test "有奖励的任务失效后退回冻结稻米" do
+    publisher = task_publisher_fixture()
+    {:ok, _} = Rice.Grains.grant(publisher, 100)
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "到期退回",
+               description: "无人领取",
+               reward_amount: 70
+             })
+
+    task
+    |> change(application_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+    |> Repo.update!()
+
+    assert %{expired: 1} = Tasks.expire_due_tasks()
+    assert %{reward_status: "refunded"} = Repo.get!(Rice.Tasks.Task, task.id)
+
+    assert %{grain_balance: 100, grain_frozen_balance: 0} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
   end
 
   test "任务列表支持后端关键词和结束状态筛选" do

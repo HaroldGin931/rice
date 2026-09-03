@@ -42,16 +42,23 @@ defmodule RiceWeb.Api.TaskControllerTest do
 
   test "接口跑通申请、任命、提交、驳回与审核通过", %{conn: conn} do
     publisher = task_publisher_fixture()
+    {:ok, _} = Rice.Grains.grant(publisher, 100)
     {:ok, publisher_token} = Rice.Accounts.issue_token(publisher)
     {worker, worker_token} = user_with_token()
 
     created =
       conn
       |> authed(publisher_token)
-      |> post(~p"/api/tasks", %{title: "整理村史", description: "完成文字稿"})
+      |> post(~p"/api/tasks", %{
+        title: "整理村史",
+        description: "完成文字稿",
+        reward_amount: 60
+      })
       |> json_response(201)
 
     task_id = created["data"]["id"]
+    assert created["data"]["reward_amount"] == 60
+    assert created["data"]["reward_status"] == "reserved"
 
     applied =
       build_conn()
@@ -129,6 +136,8 @@ defmodule RiceWeb.Api.TaskControllerTest do
       |> json_response(200)
 
     assert completed["data"]["status"] == "completed"
+    assert completed["data"]["reward_status"] == "settled"
+    assert Rice.Repo.get!(Rice.Accounts.User, worker.id).grain_balance == 60
 
     assert Enum.map(completed["data"]["events"], &{&1["from_status"], &1["to_status"]}) == [
              {nil, "open"},
@@ -197,6 +206,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
 
     task_id = draft["data"]["id"]
     assert draft["data"]["status"] == "draft"
+    assert draft["data"]["published_at"] == nil
 
     assert %{"data" => []} = build_conn() |> get(~p"/api/tasks") |> json_response(200)
     assert build_conn() |> get(~p"/api/tasks/#{task_id}") |> json_response(404)
@@ -220,6 +230,14 @@ defmodule RiceWeb.Api.TaskControllerTest do
       |> json_response(200)
 
     assert published["data"]["status"] == "open"
+
+    open_event = Enum.find(published["data"]["events"], &(&1["to_status"] == "open"))
+    assert published["data"]["published_at"] == open_event["inserted_at"]
+
+    assert %{"data" => [%{"published_at" => published_at}]} =
+             build_conn() |> get(~p"/api/tasks") |> json_response(200)
+
+    assert published_at == open_event["inserted_at"]
 
     cancelled =
       build_conn()
