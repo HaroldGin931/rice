@@ -21,6 +21,25 @@ defmodule RiceWeb.Api.TaskControllerTest do
            |> json_response(403)
   end
 
+  test "公开读取任意用户参与和发布的任务", %{conn: conn} do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    task = task_fixture(publisher)
+    assert {:ok, _application} = Rice.Tasks.apply(worker, task, %{})
+
+    assert %{"data" => [%{"id" => task_id}]} =
+             conn
+             |> get(~p"/api/tasks?participant_did=#{worker.did}")
+             |> json_response(200)
+
+    assert task_id == task.id
+
+    assert %{"data" => [%{"id" => ^task_id}]} =
+             build_conn()
+             |> get(~p"/api/tasks?creator_did=#{publisher.did}")
+             |> json_response(200)
+  end
+
   test "接口跑通申请、任命、提交、驳回与审核通过", %{conn: conn} do
     publisher = task_publisher_fixture()
     {:ok, publisher_token} = Rice.Accounts.issue_token(publisher)

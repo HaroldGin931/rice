@@ -62,6 +62,33 @@ defmodule Rice.TasksTest do
     assert {:error, :forbidden} = Tasks.apply(publisher, task, %{})
   end
 
+  test "公开列表可按任意用户的参与和发布记录筛选" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    other = user_fixture()
+    task = task_fixture(publisher)
+    other_task = task_fixture(task_publisher_fixture())
+
+    assert {:ok, _draft} =
+             Tasks.create_task(publisher, %{
+               title: "未公开草稿",
+               description: "不进入公开履历",
+               status: "draft"
+             })
+
+    assert {:ok, _application} = Tasks.apply(worker, task, %{})
+    assert {:ok, _application} = Tasks.apply(other, other_task, %{})
+
+    participant_tasks =
+      Tasks.list_tasks(nil, %{"participant_did" => worker.did}).entries
+
+    created_tasks =
+      Tasks.list_tasks(nil, %{"creator_did" => publisher.did}).entries
+
+    assert Enum.map(participant_tasks, & &1.id) == [task.id]
+    assert Enum.map(created_tasks, & &1.id) == [task.id]
+  end
+
   test "驳回必须填写原因" do
     publisher = task_publisher_fixture()
     worker = user_fixture()

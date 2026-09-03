@@ -18,6 +18,7 @@ defmodule Rice.Tasks do
       from(t in Task, as: :task)
       |> scope_visibility(user, params["mine"])
       |> filter_status(params["status"])
+      |> scope_public_user(params["participant_did"], params["creator_did"])
       |> scope_mine(user, params["mine"])
       |> Pagination.paginate(Repo, Pagination.params(params))
 
@@ -308,6 +309,36 @@ defmodule Rice.Tasks do
        do: from(t in query, where: t.status == ^status)
 
   defp filter_status(query, _), do: query
+
+  defp scope_public_user(query, participant_did, creator_did) do
+    query
+    |> scope_participant(participant_did)
+    |> scope_creator(creator_did)
+  end
+
+  defp scope_participant(query, did) when is_binary(did) and did != "" do
+    application =
+      from(a in Application,
+        join: user in User,
+        on: user.id == a.user_id,
+        where: a.task_id == parent_as(:task).id and user.did == ^did,
+        select: 1
+      )
+
+    from(t in query, where: exists(application))
+  end
+
+  defp scope_participant(query, _did), do: query
+
+  defp scope_creator(query, did) when is_binary(did) and did != "" do
+    from(t in query,
+      join: creator in User,
+      on: creator.id == t.creator_id,
+      where: creator.did == ^did
+    )
+  end
+
+  defp scope_creator(query, _did), do: query
 
   defp scope_mine(query, %User{id: id}, "created"),
     do: from(t in query, where: t.creator_id == ^id)
