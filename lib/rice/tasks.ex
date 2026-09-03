@@ -15,14 +15,15 @@ defmodule Rice.Tasks do
   def list_tasks(user, params \\ %{}) do
     expire_due_tasks()
 
-    page =
+    query =
       from(t in Task, as: :task)
       |> scope_visibility(user, params["mine"])
       |> filter_status(params["status"])
       |> filter_query(params["q"])
       |> scope_public_user(params["participant_did"], params["creator_did"])
       |> scope_mine(user, params["mine"])
-      |> Pagination.paginate(Repo, Pagination.params(params))
+
+    page = paginate_tasks(query, params)
 
     %{page | entries: preload_list(page.entries)}
   end
@@ -439,6 +440,54 @@ defmodule Rice.Tasks do
   end
 
   defp filter_query(query, _), do: query
+
+  defp paginate_tasks(query, %{"sort" => "published"} = params) do
+    %{limit: limit, before: before} = Pagination.params(params)
+
+    published_events =
+      from(e in Event,
+        where:
+          e.to_status == "open" and
+            (is_nil(e.detail) or e.detail != "状态记录从这里开始"),
+        group_by: e.task_id,
+        select: %{task_id: e.task_id, cursor: min(e.id)}
+      )
+
+    query =
+      from([task: task] in query,
+        left_join: published in subquery(published_events),
+        as: :published,
+        on: published.task_id == task.id,
+        select_merge: %{
+          search_cursor: fragment("COALESCE(?, ?)", published.cursor, task.id)
+        }
+      )
+      |> before_published(before)
+      |> order_by(
+        [task: task, published: published],
+        desc: fragment("COALESCE(?, ?)", published.cursor, task.id)
+      )
+      |> limit(^(limit + 1))
+      |> Repo.all()
+
+    {entries, more} = Enum.split(query, limit)
+
+    %{
+      entries: entries,
+      next_cursor: if(more == [], do: nil, else: List.last(entries).search_cursor)
+    }
+  end
+
+  defp paginate_tasks(query, params),
+    do: Pagination.paginate(query, Repo, Pagination.params(params))
+
+  defp before_published(query, nil), do: query
+
+  defp before_published(query, before) do
+    from([task: task, published: published] in query,
+      where: fragment("COALESCE(?, ?)", published.cursor, task.id) < ^before
+    )
+  end
 
   defp scope_public_user(query, participant_did, creator_did) do
     query

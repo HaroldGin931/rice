@@ -370,4 +370,44 @@ defmodule Rice.TasksTest do
     assert [closed] = Tasks.list_tasks(nil, %{"status" => "closed"}).entries
     assert closed.id == matching.id
   end
+
+  test "搜索按真实发布时间游标分页" do
+    publisher = task_publisher_fixture()
+
+    assert {:ok, draft} =
+             Tasks.create_task(publisher, %{
+               title: "同一搜索词的旧草稿",
+               description: "稍后发布",
+               status: "draft"
+             })
+
+    assert {:ok, older_public} =
+             Tasks.create_task(publisher, %{
+               title: "同一搜索词的公开任务",
+               description: "直接发布"
+             })
+
+    assert {:ok, newer_public} = Tasks.publish_draft(publisher, draft)
+
+    first =
+      Tasks.list_tasks(nil, %{
+        "q" => "同一搜索词",
+        "sort" => "published",
+        "limit" => "1"
+      })
+
+    assert Enum.map(first.entries, & &1.id) == [newer_public.id]
+    assert is_binary(first.next_cursor)
+
+    second =
+      Tasks.list_tasks(nil, %{
+        "q" => "同一搜索词",
+        "sort" => "published",
+        "limit" => "1",
+        "before" => first.next_cursor
+      })
+
+    assert Enum.map(second.entries, & &1.id) == [older_public.id]
+    assert second.next_cursor == nil
+  end
 end

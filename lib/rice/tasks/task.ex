@@ -13,6 +13,7 @@ defmodule Rice.Tasks.Task do
     field(:appointment_reason, :string)
     field(:reward_amount, :integer, default: 0)
     field(:reward_status, :string, default: "none")
+    field(:search_cursor, :string, virtual: true)
 
     belongs_to(:creator, Rice.Accounts.User)
     belongs_to(:assignee, Rice.Accounts.User)
