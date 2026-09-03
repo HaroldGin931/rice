@@ -8,7 +8,7 @@ defmodule Rice.Tasks do
 
   alias Ecto.Multi
   alias Rice.Accounts.User
-  alias Rice.Tasks.{Application, Submission, Task}
+  alias Rice.Tasks.{Application, Notification, Submission, Task}
   alias Rice.{Pagination, Repo}
 
   def list_tasks(user, params \\ %{}) do
@@ -107,10 +107,14 @@ defmodule Rice.Tasks do
   def publish_draft(%User{}, %Task{}), do: {:error, :forbidden}
 
   def cancel(%User{id: creator_id}, %Task{creator_id: creator_id, status: "open"} = task) do
-    update_task(
+    notifications =
+      Enum.map(applicant_ids(task.id), &{&1, creator_id, "task_cancelled", nil})
+
+    update_task_with_notifications(
       from(t in Task, where: t.id == ^task.id and t.status == "open"),
-      task.id,
-      status: "cancelled"
+      task,
+      [status: "cancelled"],
+      notifications
     )
   end
 
@@ -121,12 +125,22 @@ defmodule Rice.Tasks do
     do: {:error, :forbidden}
 
   def apply(%User{} = user, %Task{status: "open"} = task, attrs) do
-    %Application{task_id: task.id, user_id: user.id}
-    |> Application.create_changeset(attrs)
-    |> Repo.insert()
+    application =
+      Application.create_changeset(%Application{task_id: task.id, user_id: user.id}, attrs)
+
+    Multi.new()
+    |> Multi.insert(:application, application)
+    |> Multi.insert(
+      :notification,
+      notification_changeset(task, task.creator_id, user.id, "application_created")
+    )
+    |> Repo.transaction()
     |> case do
-      {:ok, application} -> {:ok, Repo.preload(application, user: :avatar)}
-      error -> error
+      {:ok, %{application: application}} ->
+        {:ok, Repo.preload(application, user: :avatar)}
+
+      {:error, _step, reason, _changes} ->
+        {:error, reason}
     end
   end
 
@@ -148,13 +162,25 @@ defmodule Rice.Tasks do
     changeset = Task.appointment_changeset(task, attrs)
 
     if changeset.valid? do
-      update_task(
+      appointment_reason = Ecto.Changeset.get_field(changeset, :appointment_reason)
+
+      notifications =
+        Enum.map(applicant_ids(task.id), fn user_id ->
+          if user_id == application.user_id,
+            do: {user_id, creator_id, "assignee_appointed", appointment_reason},
+            else: {user_id, creator_id, "application_not_selected", nil}
+        end)
+
+      update_task_with_notifications(
         from(t in Task, where: t.id == ^task.id and t.status == "open"),
-        task.id,
-        status: "in_progress",
-        assignee_id: application.user_id,
-        appointed_at: DateTime.utc_now(),
-        appointment_reason: Ecto.Changeset.get_field(changeset, :appointment_reason)
+        task,
+        [
+          status: "in_progress",
+          assignee_id: application.user_id,
+          appointed_at: DateTime.utc_now(),
+          appointment_reason: appointment_reason
+        ],
+        notifications
       )
     else
       {:error, changeset}
@@ -193,6 +219,10 @@ defmodule Rice.Tasks do
       )
     end)
     |> Multi.insert(:submission, changeset)
+    |> Multi.insert(
+      :notification,
+      notification_changeset(task, task.creator_id, user_id, "result_submitted")
+    )
     |> Repo.transaction()
     |> transaction_task(task.id)
   end
@@ -211,13 +241,14 @@ defmodule Rice.Tasks do
   defp approve_submission(
          %User{id: creator_id},
          %Task{creator_id: creator_id, status: "under_review"} = task,
-         %Submission{task_id: task_id, review_reason: nil}
+         %Submission{task_id: task_id, review_reason: nil} = submission
        )
        when task_id == task.id do
-    update_task(
+    update_task_with_notifications(
       from(t in Task, where: t.id == ^task.id and t.status == "under_review"),
-      task.id,
-      status: "completed"
+      task,
+      [status: "completed"],
+      [{submission.user_id, creator_id, "result_approved", nil}]
     )
   end
 
@@ -254,6 +285,10 @@ defmodule Rice.Tasks do
         )
       end)
       |> Multi.update(:submission, changeset)
+      |> Multi.insert(
+        :notification,
+        notification_changeset(task, submission.user_id, creator_id, "changes_requested", reason)
+      )
       |> Repo.transaction()
       |> transaction_task(task.id)
     else
@@ -284,6 +319,25 @@ defmodule Rice.Tasks do
       )
 
     %{expired: expired}
+  end
+
+  def list_notifications(%User{id: user_id}) do
+    from(n in Notification,
+      where: n.recipient_id == ^user_id,
+      order_by: [desc: n.id],
+      limit: 50,
+      preload: [actor: :avatar, task: []]
+    )
+    |> Repo.all()
+  end
+
+  def mark_notifications_read(%User{id: user_id}) do
+    Repo.update_all(
+      from(n in Notification, where: n.recipient_id == ^user_id and is_nil(n.read_at)),
+      set: [read_at: DateTime.utc_now(), updated_at: DateTime.utc_now()]
+    )
+
+    :ok
   end
 
   defp initial_status(attrs) do
@@ -392,6 +446,42 @@ defmodule Rice.Tasks do
       {:ok, _} -> fetch_task_record(task_id)
       error -> error
     end
+  end
+
+  defp update_task_with_notifications(query, task, updates, notifications) do
+    now = DateTime.utc_now()
+
+    multi =
+      Multi.new()
+      |> Multi.run(:task, fn repo, _ ->
+        conditional_update(repo, query, Keyword.put(updates, :updated_at, now))
+      end)
+
+    notifications
+    |> Enum.with_index()
+    |> Enum.reduce(multi, fn {{recipient_id, actor_id, event, detail}, index}, multi ->
+      Multi.insert(
+        multi,
+        {:notification, index},
+        notification_changeset(task, recipient_id, actor_id, event, detail)
+      )
+    end)
+    |> Repo.transaction()
+    |> transaction_task(task.id)
+  end
+
+  defp applicant_ids(task_id) do
+    Repo.all(from(a in Application, where: a.task_id == ^task_id, select: a.user_id))
+  end
+
+  defp notification_changeset(task, recipient_id, actor_id, event, detail \\ nil) do
+    Notification.create_changeset(%Notification{}, %{
+      task_id: task.id,
+      recipient_id: recipient_id,
+      actor_id: actor_id,
+      event: event,
+      detail: detail
+    })
   end
 
   defp fetch_record(schema, task_id, id) do

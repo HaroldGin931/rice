@@ -137,6 +137,20 @@ defmodule RiceWeb.Api.TaskControllerTest do
       |> json_response(200)
 
     assert Enum.map(mine["data"], & &1["id"]) == [task_id]
+
+    notifications =
+      build_conn()
+      |> authed(worker_token)
+      |> get(~p"/api/task_notifications")
+      |> json_response(200)
+
+    assert Enum.sort(Enum.map(notifications["notifications"], & &1["reason"])) ==
+             Enum.sort(~w(task-assignee_appointed task-changes_requested task-result_approved))
+
+    assert build_conn()
+           |> authed(worker_token)
+           |> post(~p"/api/task_notifications/read")
+           |> response(204)
   end
 
   test "任务状态被推进后重复动作返回 409", %{conn: conn} do

@@ -6,12 +6,14 @@ defmodule Rice.TasksTest do
   test "完整状态机保留驳回原因与承作人的完成历史" do
     publisher = task_publisher_fixture()
     worker = user_fixture()
+    other = user_fixture()
 
     assert {:ok, task} =
              Tasks.create_task(publisher, %{title: "整理访谈", description: "完成文字稿"})
 
     assert task.status == "open"
     assert {:ok, application} = Tasks.apply(worker, task, %{reason: "有口述史经验"})
+    assert {:ok, _} = Tasks.apply(other, task, %{reason: "也可以承做"})
 
     assert [pending] = Tasks.list_tasks(worker, %{"mine" => "applied"}).entries
     assert pending.id == task.id
@@ -49,6 +51,13 @@ defmodule Rice.TasksTest do
 
     assigned = Tasks.list_tasks(worker, %{"mine" => "assigned"}).entries
     assert Enum.map(assigned, & &1.id) == [completed.id]
+
+    assert MapSet.new(Enum.map(Tasks.list_notifications(worker), & &1.event)) ==
+             MapSet.new(~w(assignee_appointed changes_requested result_approved))
+
+    assert [%{event: "application_not_selected"}] = Tasks.list_notifications(other)
+    assert :ok = Tasks.mark_notifications_read(worker)
+    assert Enum.all?(Tasks.list_notifications(worker), &match?(%DateTime{}, &1.read_at))
   end
 
   test "普通用户不能发布，申请人不能申请自己的任务" do
@@ -100,6 +109,20 @@ defmodule Rice.TasksTest do
 
     assert {:error, changeset} = Tasks.request_changes(publisher, task, submission.id, "   ")
     assert Map.has_key?(errors_on(changeset), :review_reason)
+  end
+
+  test "任务取消通知所有申请人" do
+    publisher = task_publisher_fixture()
+    applicants = [user_fixture(), user_fixture()]
+    task = task_fixture(publisher)
+
+    Enum.each(applicants, fn user -> assert {:ok, _} = Tasks.apply(user, task, %{}) end)
+    assert {:ok, %{status: "cancelled"}} = Tasks.cancel(publisher, task)
+
+    Enum.each(applicants, fn user ->
+      assert [%{event: "task_cancelled", actor_id: actor_id}] = Tasks.list_notifications(user)
+      assert actor_id == publisher.id
+    end)
   end
 
   test "草稿只有发布者可见，发布后进入公开列表" do

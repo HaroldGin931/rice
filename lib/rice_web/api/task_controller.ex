@@ -97,4 +97,15 @@ defmodule RiceWeb.Api.TaskController do
       render(conn, :show, task: task, current_user: conn.assigns.current_user)
     end
   end
+
+  def notifications(conn, _params) do
+    render(conn, :notifications,
+      notifications: Tasks.list_notifications(conn.assigns.current_user)
+    )
+  end
+
+  def read_notifications(conn, _params) do
+    Tasks.mark_notifications_read(conn.assigns.current_user)
+    send_resp(conn, :no_content, "")
+  end
 end
