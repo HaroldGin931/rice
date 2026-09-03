@@ -49,6 +49,21 @@ defmodule Rice.TasksTest do
     assert {:ok, completed} = Tasks.approve_result(publisher, task, resubmission.id)
     assert completed.status == "completed"
 
+    assert Enum.map(completed.events, &{&1.from_status, &1.to_status}) == [
+             {nil, "open"},
+             {"open", "in_progress"},
+             {"in_progress", "under_review"},
+             {"under_review", "in_progress"},
+             {"in_progress", "under_review"},
+             {"under_review", "completed"}
+           ]
+
+    assert Enum.find(
+             completed.events,
+             &(&1.from_status == "under_review" and &1.to_status == "in_progress")
+           )
+           |> Map.fetch!(:detail) == "缺少第二位受访者确认"
+
     assigned = Tasks.list_tasks(worker, %{"mine" => "assigned"}).entries
     assert Enum.map(assigned, & &1.id) == [completed.id]
 
@@ -56,6 +71,8 @@ defmodule Rice.TasksTest do
              MapSet.new(~w(assignee_appointed changes_requested result_approved))
 
     assert [%{event: "application_not_selected"}] = Tasks.list_notifications(other)
+    assert [not_selected] = Tasks.list_tasks(other, %{"mine" => "applied"}).entries
+    assert not_selected.id == completed.id
     assert :ok = Tasks.mark_notifications_read(worker)
     assert Enum.all?(Tasks.list_notifications(worker), &match?(%DateTime{}, &1.read_at))
   end
@@ -122,7 +139,46 @@ defmodule Rice.TasksTest do
     Enum.each(applicants, fn user ->
       assert [%{event: "task_cancelled", actor_id: actor_id}] = Tasks.list_notifications(user)
       assert actor_id == publisher.id
+      assert [history] = Tasks.list_tasks(user, %{"mine" => "applied"}).entries
+      assert history.id == task.id
     end)
+  end
+
+  test "过期或状态已变化的旧快照不能再写入申请" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    task = task_fixture(publisher)
+
+    assert {:ok, _cancelled} = Tasks.cancel(publisher, task)
+    assert {:error, :conflict} = Tasks.apply(worker, task, %{})
+
+    expiring = task_fixture(publisher)
+
+    expiring
+    |> change(application_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+    |> Repo.update!()
+
+    assert {:error, :conflict} = Tasks.apply(worker, expiring, %{})
+  end
+
+  test "每位发布者只能保留一份草稿" do
+    publisher = task_publisher_fixture()
+
+    assert {:ok, _draft} =
+             Tasks.create_task(publisher, %{
+               title: "第一份草稿",
+               description: "继续编辑这一份",
+               status: "draft"
+             })
+
+    assert {:error, changeset} =
+             Tasks.create_task(publisher, %{
+               title: "第二份草稿",
+               description: "不应创建",
+               status: "draft"
+             })
+
+    assert Map.has_key?(errors_on(changeset), :creator_id)
   end
 
   test "草稿只有发布者可见，发布后进入公开列表" do
@@ -176,7 +232,11 @@ defmodule Rice.TasksTest do
   test "领取截止后任务失效且不能继续申请" do
     publisher = task_publisher_fixture()
     worker = user_fixture()
-    task = task_fixture(publisher)
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{title: "领取即将截止", description: "测试自动失效"})
+
+    assert {:ok, _application} = Tasks.apply(worker, task, %{})
 
     task =
       task
@@ -186,7 +246,24 @@ defmodule Rice.TasksTest do
     assert %{expired: 1} = Tasks.expire_due_tasks()
     assert {:ok, expired} = Tasks.fetch_task(task.id, worker)
     assert expired.status == "expired"
+    assert Enum.map(expired.events, & &1.to_status) == ["open", "expired"]
     assert {:error, :conflict} = Tasks.apply(worker, expired, %{})
+    assert [%{event: "task_expired"}] = Tasks.list_notifications(worker)
+    assert [history] = Tasks.list_tasks(worker, %{"mine" => "applied"}).entries
+    assert history.id == task.id
     assert :ok = Rice.Workers.ExpireTasks.perform(%Oban.Job{args: %{}})
+  end
+
+  test "任务列表支持后端关键词和结束状态筛选" do
+    publisher = task_publisher_fixture()
+    matching = task_fixture(publisher, %{title: "古村门楼测绘", description: "整理尺寸"})
+    _other = task_fixture(publisher, %{title: "村播剪辑", description: "整理素材"})
+
+    assert [result] = Tasks.list_tasks(nil, %{"q" => "门楼"}).entries
+    assert result.id == matching.id
+
+    assert {:ok, _cancelled} = Tasks.cancel(publisher, matching)
+    assert [closed] = Tasks.list_tasks(nil, %{"status" => "closed"}).entries
+    assert closed.id == matching.id
   end
 end

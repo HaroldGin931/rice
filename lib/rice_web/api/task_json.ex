@@ -1,7 +1,7 @@
 defmodule RiceWeb.Api.TaskJSON do
   @moduledoc "Task V1 的 JSON 表示。"
   alias Rice.Accounts.User
-  alias Rice.Tasks.{Application, Submission}
+  alias Rice.Tasks.{Application, Event, Submission}
   alias RiceWeb.Api.UserJSON
 
   def index(%{page: page} = assigns) do
@@ -32,6 +32,7 @@ defmodule RiceWeb.Api.TaskJSON do
   defp data(task, current_user, detail?) do
     applications = loaded(task.applications)
     submissions = loaded(task.submissions)
+    events = loaded(task.events)
 
     %{
       id: task.id,
@@ -48,6 +49,7 @@ defmodule RiceWeb.Api.TaskJSON do
       allowed_actions: allowed_actions(task, applications, current_user),
       applications: visible_applications(task, applications, current_user, detail?),
       submissions: visible_submissions(task, submissions, current_user, detail?),
+      events: if(detail?, do: Enum.map(events, &event/1), else: nil),
       inserted_at: task.inserted_at,
       updated_at: task.updated_at
     }
@@ -90,6 +92,17 @@ defmodule RiceWeb.Api.TaskJSON do
     }
   end
 
+  defp event(%Event{} = event) do
+    %{
+      id: event.id,
+      from_status: event.from_status,
+      to_status: event.to_status,
+      detail: event.detail,
+      actor: public_user(event.actor),
+      inserted_at: event.inserted_at
+    }
+  end
+
   defp allowed_actions(_task, _applications, nil), do: []
 
   defp allowed_actions(task, applications, %User{id: user_id}) do
@@ -126,6 +139,8 @@ defmodule RiceWeb.Api.TaskJSON do
 
   defp application_status(%Application{user_id: id}, %{assignee_id: id}), do: "appointed"
   defp application_status(_application, %{status: "open"}), do: "pending"
+  defp application_status(_application, %{status: "cancelled"}), do: "cancelled"
+  defp application_status(_application, %{status: "expired"}), do: "expired"
   defp application_status(_application, _task), do: "not_selected"
 
   defp submission_status(%Submission{review_reason: reason}, _task) when not is_nil(reason),

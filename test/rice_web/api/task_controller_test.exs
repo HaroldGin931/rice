@@ -130,6 +130,15 @@ defmodule RiceWeb.Api.TaskControllerTest do
 
     assert completed["data"]["status"] == "completed"
 
+    assert Enum.map(completed["data"]["events"], &{&1["from_status"], &1["to_status"]}) == [
+             {nil, "open"},
+             {"open", "in_progress"},
+             {"in_progress", "under_review"},
+             {"under_review", "in_progress"},
+             {"in_progress", "under_review"},
+             {"under_review", "completed"}
+           ]
+
     mine =
       build_conn()
       |> authed(worker_token)
@@ -219,5 +228,34 @@ defmodule RiceWeb.Api.TaskControllerTest do
       |> json_response(200)
 
     assert cancelled["data"]["status"] == "cancelled"
+  end
+
+  test "申请人的取消历史保持可见并标记为已取消", %{conn: conn} do
+    publisher = task_publisher_fixture()
+    {:ok, publisher_token} = Rice.Accounts.issue_token(publisher)
+    {_worker, worker_token} = user_with_token()
+    task = task_fixture(publisher)
+
+    assert build_conn()
+           |> authed(worker_token)
+           |> post(~p"/api/tasks/#{task.id}/applications", %{})
+           |> json_response(201)
+
+    assert build_conn()
+           |> authed(publisher_token)
+           |> post(~p"/api/tasks/#{task.id}/cancel")
+           |> json_response(200)
+
+    assert %{
+             "data" => [
+               %{"id" => task_id, "my_application_status" => "cancelled"}
+             ]
+           } =
+             conn
+             |> authed(worker_token)
+             |> get(~p"/api/tasks?mine=applied")
+             |> json_response(200)
+
+    assert task_id == task.id
   end
 end

@@ -8,7 +8,7 @@ defmodule Rice.Tasks do
 
   alias Ecto.Multi
   alias Rice.Accounts.User
-  alias Rice.Tasks.{Application, Notification, Submission, Task}
+  alias Rice.Tasks.{Application, Event, Notification, Submission, Task}
   alias Rice.{Pagination, Repo}
 
   def list_tasks(user, params \\ %{}) do
@@ -18,6 +18,7 @@ defmodule Rice.Tasks do
       from(t in Task, as: :task)
       |> scope_visibility(user, params["mine"])
       |> filter_status(params["status"])
+      |> filter_query(params["q"])
       |> scope_public_user(params["participant_did"], params["creator_did"])
       |> scope_mine(user, params["mine"])
       |> Pagination.paginate(Repo, Pagination.params(params))
@@ -50,10 +51,20 @@ defmodule Rice.Tasks do
 
   def create_task(%User{can_publish_tasks: true} = user, attrs) do
     with {:ok, status} <- initial_status(attrs) do
-      %Task{creator_id: user.id, status: status}
-      |> Task.create_changeset(attrs)
-      |> Repo.insert()
-      |> with_detail()
+      task_changeset =
+        %Task{creator_id: user.id, status: status}
+        |> Task.create_changeset(attrs)
+
+      Multi.new()
+      |> Multi.insert(:task, task_changeset)
+      |> Multi.insert(:event, fn %{task: task} ->
+        event_changeset(task.id, user.id, nil, status)
+      end)
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{task: task}} -> {:ok, preload_detail(task)}
+        {:error, _step, reason, _changes} -> {:error, reason}
+      end
     end
   end
 
@@ -90,10 +101,11 @@ defmodule Rice.Tasks do
       ) do
     case Task.publish_changeset(task) do
       %{valid?: true} ->
-        update_task(
+        transition_task(
           from(t in Task, where: t.id == ^task.id and t.status == "draft"),
-          task.id,
-          status: "open"
+          task,
+          [status: "open"],
+          creator_id
         )
 
       changeset ->
@@ -108,12 +120,16 @@ defmodule Rice.Tasks do
 
   def cancel(%User{id: creator_id}, %Task{creator_id: creator_id, status: "open"} = task) do
     notifications =
-      Enum.map(applicant_ids(task.id), &{&1, creator_id, "task_cancelled", nil})
+      fn repo ->
+        Enum.map(applicant_ids(repo, task.id), &{&1, creator_id, "task_cancelled", nil})
+      end
 
-    update_task_with_notifications(
+    transition_task(
       from(t in Task, where: t.id == ^task.id and t.status == "open"),
       task,
       [status: "cancelled"],
+      creator_id,
+      nil,
       notifications
     )
   end
@@ -125,14 +141,24 @@ defmodule Rice.Tasks do
     do: {:error, :forbidden}
 
   def apply(%User{} = user, %Task{status: "open"} = task, attrs) do
+    now = DateTime.utc_now()
+
     application =
       Application.create_changeset(%Application{task_id: task.id, user_id: user.id}, attrs)
 
     Multi.new()
+    |> Multi.run(:task, fn repo, _ -> lock_open_task(repo, task.id, now) end)
     |> Multi.insert(:application, application)
     |> Multi.insert(
       :notification,
-      notification_changeset(task, task.creator_id, user.id, "application_created")
+      fn %{task: current_task} ->
+        notification_changeset(
+          current_task,
+          current_task.creator_id,
+          user.id,
+          "application_created"
+        )
+      end
     )
     |> Repo.transaction()
     |> case do
@@ -165,13 +191,15 @@ defmodule Rice.Tasks do
       appointment_reason = Ecto.Changeset.get_field(changeset, :appointment_reason)
 
       notifications =
-        Enum.map(applicant_ids(task.id), fn user_id ->
-          if user_id == application.user_id,
-            do: {user_id, creator_id, "assignee_appointed", appointment_reason},
-            else: {user_id, creator_id, "application_not_selected", nil}
-        end)
+        fn repo ->
+          Enum.map(applicant_ids(repo, task.id), fn user_id ->
+            if user_id == application.user_id,
+              do: {user_id, creator_id, "assignee_appointed", appointment_reason},
+              else: {user_id, creator_id, "application_not_selected", nil}
+          end)
+        end
 
-      update_task_with_notifications(
+      transition_task(
         from(t in Task, where: t.id == ^task.id and t.status == "open"),
         task,
         [
@@ -180,6 +208,8 @@ defmodule Rice.Tasks do
           appointed_at: DateTime.utc_now(),
           appointment_reason: appointment_reason
         ],
+        creator_id,
+        appointment_reason,
         notifications
       )
     else
@@ -218,6 +248,10 @@ defmodule Rice.Tasks do
         updated_at: now
       )
     end)
+    |> Multi.insert(
+      :event,
+      event_changeset(task.id, user_id, "in_progress", "under_review")
+    )
     |> Multi.insert(:submission, changeset)
     |> Multi.insert(
       :notification,
@@ -244,10 +278,12 @@ defmodule Rice.Tasks do
          %Submission{task_id: task_id, review_reason: nil} = submission
        )
        when task_id == task.id do
-    update_task_with_notifications(
+    transition_task(
       from(t in Task, where: t.id == ^task.id and t.status == "under_review"),
       task,
       [status: "completed"],
+      creator_id,
+      nil,
       [{submission.user_id, creator_id, "result_approved", nil}]
     )
   end
@@ -284,6 +320,10 @@ defmodule Rice.Tasks do
           updated_at: now
         )
       end)
+      |> Multi.insert(
+        :event,
+        event_changeset(task.id, creator_id, "under_review", "in_progress", reason)
+      )
       |> Multi.update(:submission, changeset)
       |> Multi.insert(
         :notification,
@@ -308,15 +348,13 @@ defmodule Rice.Tasks do
     do: {:error, :forbidden}
 
   def expire_due_tasks(now \\ DateTime.utc_now()) do
-    {expired, _} =
-      Repo.update_all(
-        from(t in Task,
-          where:
-            t.status == "open" and not is_nil(t.application_deadline) and
-              t.application_deadline <= ^now
-        ),
-        set: [status: "expired", updated_at: now]
+    expired =
+      from(t in Task,
+        where:
+          t.status == "open" and not is_nil(t.application_deadline) and
+            t.application_deadline <= ^now
       )
+      |> expire_tasks(now)
 
     %{expired: expired}
   end
@@ -362,7 +400,17 @@ defmodule Rice.Tasks do
        when status in ~w(draft open in_progress under_review completed expired cancelled),
        do: from(t in query, where: t.status == ^status)
 
+  defp filter_status(query, "closed"),
+    do: from(t in query, where: t.status in ["expired", "cancelled"])
+
   defp filter_status(query, _), do: query
+
+  defp filter_query(query, value) when is_binary(value) and value != "" do
+    pattern = "%" <> escape_like(String.trim(value)) <> "%"
+    from(t in query, where: ilike(t.title, ^pattern) or ilike(t.description, ^pattern))
+  end
+
+  defp filter_query(query, _), do: query
 
   defp scope_public_user(query, participant_did, creator_did) do
     query
@@ -407,7 +455,9 @@ defmodule Rice.Tasks do
         select: 1
       )
 
-    from(t in query, where: t.status == "open" and exists(application))
+    from(t in query,
+      where: exists(application) and (is_nil(t.assignee_id) or t.assignee_id != ^id)
+    )
   end
 
   defp scope_mine(query, nil, mine) when mine in ~w(created assigned applied),
@@ -419,15 +469,53 @@ defmodule Rice.Tasks do
     if Rice.Tsid.valid?(id) do
       now = DateTime.utc_now()
 
-      Repo.update_all(
-        from(t in Task,
-          where:
-            t.id == ^id and t.status == "open" and not is_nil(t.application_deadline) and
-              t.application_deadline <= ^now
-        ),
-        set: [status: "expired", updated_at: now]
+      from(t in Task,
+        where:
+          t.id == ^id and t.status == "open" and not is_nil(t.application_deadline) and
+            t.application_deadline <= ^now
       )
+      |> expire_tasks(now)
     end
+  end
+
+  defp expire_tasks(query, now) do
+    {:ok, expired} =
+      Repo.transaction(fn ->
+        {count, tasks} =
+          query
+          |> select([t], {t.id, t.creator_id})
+          |> Repo.update_all(set: [status: "expired", updated_at: now])
+
+        creators = Map.new(tasks)
+        task_ids = Map.keys(creators)
+
+        Enum.each(tasks, fn {task_id, _creator_id} ->
+          event_changeset(task_id, nil, "open", "expired") |> Repo.insert!()
+        end)
+
+        if task_ids != [] do
+          from(a in Application,
+            where: a.task_id in ^task_ids,
+            select: {a.task_id, a.user_id}
+          )
+          |> Repo.all()
+          |> Enum.each(fn {task_id, recipient_id} ->
+            task = %Task{id: task_id}
+
+            notification_changeset(
+              task,
+              recipient_id,
+              Map.fetch!(creators, task_id),
+              "task_expired"
+            )
+            |> Repo.insert!()
+          end)
+        end
+
+        count
+      end)
+
+    expired
   end
 
   defp conditional_update(repo, query, updates) do
@@ -448,7 +536,7 @@ defmodule Rice.Tasks do
     end
   end
 
-  defp update_task_with_notifications(query, task, updates, notifications) do
+  defp transition_task(query, task, updates, actor_id, detail \\ nil, notifications \\ []) do
     now = DateTime.utc_now()
 
     multi =
@@ -456,22 +544,52 @@ defmodule Rice.Tasks do
       |> Multi.run(:task, fn repo, _ ->
         conditional_update(repo, query, Keyword.put(updates, :updated_at, now))
       end)
+      |> Multi.insert(
+        :event,
+        event_changeset(task.id, actor_id, task.status, Keyword.fetch!(updates, :status), detail)
+      )
+      |> Multi.run(:notification_rows, fn repo, _ ->
+        {:ok, notification_rows(notifications, repo)}
+      end)
 
-    notifications
+    multi
+    |> Multi.merge(fn %{notification_rows: rows} -> notification_multi(task, rows) end)
+    |> Repo.transaction()
+    |> transaction_task(task.id)
+  end
+
+  defp notification_rows(builder, repo) when is_function(builder, 1), do: builder.(repo)
+  defp notification_rows(rows, _repo), do: rows
+
+  defp notification_multi(task, rows) do
+    rows
     |> Enum.with_index()
-    |> Enum.reduce(multi, fn {{recipient_id, actor_id, event, detail}, index}, multi ->
+    |> Enum.reduce(Multi.new(), fn {{recipient_id, actor_id, event, detail}, index}, multi ->
       Multi.insert(
         multi,
         {:notification, index},
         notification_changeset(task, recipient_id, actor_id, event, detail)
       )
     end)
-    |> Repo.transaction()
-    |> transaction_task(task.id)
   end
 
-  defp applicant_ids(task_id) do
-    Repo.all(from(a in Application, where: a.task_id == ^task_id, select: a.user_id))
+  defp applicant_ids(repo, task_id) do
+    repo.all(from(a in Application, where: a.task_id == ^task_id, select: a.user_id))
+  end
+
+  defp lock_open_task(repo, task_id, now) do
+    query =
+      from(t in Task,
+        where:
+          t.id == ^task_id and t.status == "open" and
+            (is_nil(t.application_deadline) or t.application_deadline > ^now),
+        lock: "FOR UPDATE"
+      )
+
+    case repo.one(query) do
+      nil -> {:error, :conflict}
+      task -> {:ok, task}
+    end
   end
 
   defp notification_changeset(task, recipient_id, actor_id, event, detail \\ nil) do
@@ -482,6 +600,23 @@ defmodule Rice.Tasks do
       event: event,
       detail: detail
     })
+  end
+
+  defp event_changeset(task_id, actor_id, from_status, to_status, detail \\ nil) do
+    Event.create_changeset(%Event{}, %{
+      task_id: task_id,
+      actor_id: actor_id,
+      from_status: from_status,
+      to_status: to_status,
+      detail: detail
+    })
+  end
+
+  defp escape_like(value) do
+    value
+    |> String.replace("\\", "\\\\")
+    |> String.replace("%", "\\%")
+    |> String.replace("_", "\\_")
   end
 
   defp fetch_record(schema, task_id, id) do
@@ -498,9 +633,6 @@ defmodule Rice.Tasks do
   defp transaction_task({:ok, _changes}, task_id), do: fetch_task_record(task_id)
   defp transaction_task({:error, _step, reason, _changes}, _task_id), do: {:error, reason}
 
-  defp with_detail({:ok, task}), do: {:ok, preload_detail(task)}
-  defp with_detail(error), do: error
-
   defp preload_list(tasks) do
     Repo.preload(tasks, creator: :avatar, assignee: :avatar, applications: [])
   end
@@ -510,7 +642,8 @@ defmodule Rice.Tasks do
       creator: :avatar,
       assignee: :avatar,
       applications: [user: :avatar],
-      submissions: [user: :avatar]
+      submissions: [user: :avatar],
+      events: from(e in Event, order_by: [asc: e.id], preload: [actor: :avatar])
     )
   end
 end

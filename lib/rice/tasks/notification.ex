@@ -2,7 +2,7 @@ defmodule Rice.Tasks.Notification do
   @moduledoc "任务状态变化发给相关用户的站内通知。"
   use Rice.Schema
 
-  @events ~w(application_created assignee_appointed application_not_selected task_cancelled result_submitted result_approved changes_requested)
+  @events ~w(application_created assignee_appointed application_not_selected task_cancelled task_expired result_submitted result_approved changes_requested)
 
   schema "task_notifications" do
     field(:event, :string)

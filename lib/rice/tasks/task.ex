@@ -16,6 +16,7 @@ defmodule Rice.Tasks.Task do
     belongs_to(:assignee, Rice.Accounts.User)
     has_many(:applications, Rice.Tasks.Application)
     has_many(:submissions, Rice.Tasks.Submission)
+    has_many(:events, Rice.Tasks.Event)
 
     timestamps()
   end
@@ -30,6 +31,7 @@ defmodule Rice.Tasks.Task do
     |> validate_length(:title, min: 1, max: 128)
     |> validate_length(:description, min: 1, max: 4000)
     |> validate_future_deadline()
+    |> unique_constraint(:creator_id, name: :tasks_one_draft_per_creator)
   end
 
   def appointment_changeset(task, attrs) do
