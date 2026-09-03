@@ -159,15 +159,13 @@ defmodule Rice.TasksTest do
     assert Enum.all?(Tasks.list_notifications(worker), &match?(%DateTime{}, &1.read_at))
   end
 
-  test "普通用户不能发布，申请人不能申请自己的任务" do
+  test "普通用户可以发布，发布者不能申请自己的任务" do
     user = user_fixture()
-    publisher = task_publisher_fixture()
 
-    assert {:error, :forbidden} =
-             Tasks.create_task(user, %{title: "越权", description: "不应创建"})
+    assert {:ok, task} =
+             Tasks.create_task(user, %{title: "普通用户任务", description: "所有人都能发布"})
 
-    task = task_fixture(publisher)
-    assert {:error, :forbidden} = Tasks.apply(publisher, task, %{})
+    assert {:error, :forbidden} = Tasks.apply(user, task, %{})
   end
 
   test "公开列表可按任意用户的参与和发布记录筛选" do

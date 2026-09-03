@@ -1,7 +1,7 @@
 defmodule RiceWeb.Api.TaskControllerTest do
   use RiceWeb.ConnCase, async: true
 
-  test "公开读取任务，写动作需要登录和发布权限", %{conn: conn} do
+  test "公开读取任务，登录用户都能发布", %{conn: conn} do
     publisher = task_publisher_fixture()
     task = task_fixture(publisher, %{title: "村史整理"})
 
@@ -13,12 +13,19 @@ defmodule RiceWeb.Api.TaskControllerTest do
     assert %{"data" => %{"allowed_actions" => []}} =
              build_conn() |> get(~p"/api/tasks/#{task.id}") |> json_response(200)
 
-    {_user, token} = user_with_token()
-
     assert build_conn()
-           |> authed(token)
-           |> post(~p"/api/tasks", %{title: "越权", description: "不能发布"})
-           |> json_response(403)
+           |> post(~p"/api/tasks", %{title: "未登录", description: "不能发布"})
+           |> json_response(401)
+
+    {user, token} = user_with_token()
+
+    assert %{"data" => %{"creator" => %{"id" => creator_id}}} =
+             build_conn()
+             |> authed(token)
+             |> post(~p"/api/tasks", %{title: "普通用户任务", description: "可以发布"})
+             |> json_response(201)
+
+    assert creator_id == user.id
   end
 
   test "公开读取任意用户参与和发布的任务", %{conn: conn} do

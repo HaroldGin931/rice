@@ -51,7 +51,7 @@ defmodule Rice.Tasks do
     end
   end
 
-  def create_task(%User{can_publish_tasks: true} = user, attrs) do
+  def create_task(%User{} = user, attrs) do
     with {:ok, status} <- initial_status(attrs) do
       task_changeset =
         %Task{creator_id: user.id, status: status}
@@ -84,8 +84,6 @@ defmodule Rice.Tasks do
       end
     end
   end
-
-  def create_task(%User{}, _attrs), do: {:error, :forbidden}
 
   def update_draft(
         %User{id: creator_id},
