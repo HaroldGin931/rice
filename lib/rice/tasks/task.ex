@@ -9,6 +9,10 @@ defmodule Rice.Tasks.Task do
     field(:description, :string)
     field(:status, :string, default: "open")
     field(:application_deadline, :utc_datetime_usec)
+    field(:execution_deadline, :utc_datetime_usec)
+    field(:requirement, :string, default: "")
+    field(:client_request_id, :string)
+    belongs_to(:node, Rice.Community.Node)
     field(:appointed_at, :utc_datetime_usec)
     field(:appointment_reason, :string)
     field(:reward_amount, :integer, default: 0)
@@ -20,6 +24,7 @@ defmodule Rice.Tasks.Task do
     has_many(:applications, Rice.Tasks.Application)
     has_many(:submissions, Rice.Tasks.Submission)
     has_many(:events, Rice.Tasks.Event)
+    has_many(:image_links, Rice.Tasks.Image, on_replace: :delete, preload_order: [asc: :position])
 
     timestamps()
   end
@@ -27,15 +32,28 @@ defmodule Rice.Tasks.Task do
   @doc "发布者只能提交任务内容；身份与状态由服务端填写。"
   def create_changeset(task, attrs) do
     task
-    |> cast(attrs, [:title, :description, :application_deadline, :reward_amount])
+    |> cast(attrs, [
+      :title,
+      :description,
+      :requirement,
+      :application_deadline,
+      :execution_deadline,
+      :reward_amount,
+      :client_request_id
+    ])
     |> validate_required([:title, :description])
     |> update_change(:title, &trim/1)
     |> update_change(:description, &trim/1)
     |> validate_length(:title, min: 1, max: 128)
     |> validate_length(:description, min: 1, max: 4000)
     |> validate_number(:reward_amount, greater_than_or_equal_to: 0)
+    |> validate_execution_deadline()
+    |> validate_length(:requirement, max: 4000)
+    |> validate_length(:client_request_id, max: 128)
+    |> unique_constraint([:creator_id, :client_request_id])
     |> validate_future_deadline()
     |> unique_constraint(:creator_id, name: :tasks_one_draft_per_creator)
+    |> Rice.Files.put_images(attrs, task.creator_id)
   end
 
   def appointment_changeset(task, attrs) do
@@ -49,6 +67,18 @@ defmodule Rice.Tasks.Task do
     task
     |> change()
     |> validate_future_deadline()
+    |> validate_execution_deadline()
+  end
+
+  defp validate_execution_deadline(changeset) do
+    deadline = get_field(changeset, :execution_deadline)
+    application = get_field(changeset, :application_deadline)
+
+    if deadline &&
+         (DateTime.compare(deadline, DateTime.utc_now()) != :gt ||
+            (application && DateTime.compare(deadline, application) != :gt)),
+       do: add_error(changeset, :execution_deadline, "交付时间须晚于现在及申请截止时间"),
+       else: changeset
   end
 
   def statuses, do: @statuses

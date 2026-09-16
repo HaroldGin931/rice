@@ -8,7 +8,7 @@ defmodule Rice.Accounts do
 
   alias Ecto.Multi
   alias Rice.Accounts.{ApiToken, SemiLink, User, VerificationCode}
-  alias Rice.{Notifications, Repo}
+  alias Rice.{Notifications, Pagination, Repo}
 
   defp pds, do: Rice.PDS.Api.impl()
 
@@ -141,6 +141,24 @@ defmodule Rice.Accounts do
   end
 
   def get_public_user(_), do: nil
+
+  @doc "按昵称或 handle 搜索公开档案；不查询联系方式，也不列出停用或已注销账号。"
+  def search_public_users(params) do
+    q = params["q"]
+    q = if is_binary(q), do: String.trim(q), else: ""
+
+    if String.length(q) in 1..256 do
+      pattern = "%" <> String.replace(q, ["\\", "%", "_"], &"\\#{&1}") <> "%"
+
+      from(u in enabled_users(),
+        where: ilike(u.nickname, ^pattern) or ilike(u.handle, ^pattern),
+        preload: [:avatar]
+      )
+      |> Pagination.paginate(Repo, Pagination.params(Map.take(params, ["limit", "before"])))
+    else
+      %{entries: [], next_cursor: nil}
+    end
+  end
 
   @doc """
   后台按运营输入的任意写法找人:rice id / DID / handle / 邮箱 / 手机号。

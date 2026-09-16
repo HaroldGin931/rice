@@ -85,6 +85,12 @@ defmodule RiceWeb.Router do
     # 某人的勋章墙。:user_id 认 "me" / rice id / DID / handle。
     get "/users/:user_id/badges", BadgeController, :index
     get "/nodes/members", NodeController, :members
+    get "/nodes/:node_id/members", NodeController, :members
+    get "/nodes/:id", NodeController, :show
+    get "/users/search", UserController, :search
+    get "/users/:identifier/profile", UserController, :profile
+    get "/events", EventController, :index
+    get "/events/:id", EventController, :show
     get "/grain_grants", GrainGrantController, :index
 
     # 期 5:提案。列表和详情公开可读,写操作在下面的认证段。
@@ -230,6 +236,21 @@ defmodule RiceWeb.Router do
     post "/proposals/:proposal_id/comments", ProposalCommentController, :create
     delete "/proposals/:proposal_id/comments/:id", ProposalCommentController, :delete
 
+    get "/wallet", WalletController, :show
+    get "/notifications", InboxController, :index
+    post "/notifications/read", InboxController, :read
+    post "/nodes/:node_id/applications", NodeController, :apply
+    post "/nodes/:node_id/applications/:application_id/approve", NodeController, :approve
+    post "/nodes/:node_id/applications/:application_id/reject", NodeController, :reject
+    post "/events", EventController, :create
+    patch "/events/:event_id", EventController, :update
+    post "/events/:event_id/publish", EventController, :publish
+    post "/events/:event_id/cancel", EventController, :cancel
+    post "/events/:event_id/finish", EventController, :finish
+    post "/events/:event_id/applications", EventController, :apply
+    post "/events/:event_id/applications/:application_id/approve", EventController, :approve
+    post "/events/:event_id/applications/:application_id/reject", EventController, :reject
+    post "/events/:event_id/applications/:application_id/remove", EventController, :remove
     post "/tasks", TaskController, :create
     patch "/tasks/:task_id", TaskController, :update
     post "/tasks/:task_id/publish", TaskController, :publish

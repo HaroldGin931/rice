@@ -1,7 +1,7 @@
 defmodule RiceWeb.Api.TaskControllerTest do
   use RiceWeb.ConnCase, async: true
 
-  test "公开读取任务，登录用户都能发布", %{conn: conn} do
+  test "公开读取任务，只有社区管理员可发布", %{conn: conn} do
     publisher = task_publisher_fixture()
     task = task_fixture(publisher, %{title: "村史整理"})
 
@@ -17,22 +17,30 @@ defmodule RiceWeb.Api.TaskControllerTest do
            |> post(~p"/api/tasks", %{title: "未登录", description: "不能发布"})
            |> json_response(401)
 
-    {user, token} = user_with_token()
+    {_user, token} = user_with_token()
 
-    assert %{"data" => %{"creator" => %{"id" => creator_id}}} =
-             build_conn()
-             |> authed(token)
-             |> post(~p"/api/tasks", %{title: "普通用户任务", description: "可以发布"})
-             |> json_response(201)
-
-    assert creator_id == user.id
+    assert build_conn()
+           |> authed(token)
+           |> post(~p"/api/tasks", %{
+             title: "普通用户任务",
+             description: "不能发布",
+             client_request_id: "ordinary-user"
+           })
+           |> json_response(403)
   end
 
-  test "公开读取任意用户参与和发布的任务", %{conn: conn} do
+  test "公开履历隐藏未录取申请，已承接任务和已发布任务可见", %{conn: conn} do
     publisher = task_publisher_fixture()
     worker = user_fixture()
     task = task_fixture(publisher)
-    assert {:ok, _application} = Rice.Tasks.apply(worker, task, %{})
+    assert {:ok, application} = Rice.Tasks.apply(worker, task, %{})
+
+    assert %{"data" => []} =
+             build_conn()
+             |> get(~p"/api/tasks?participant_did=#{worker.did}")
+             |> json_response(200)
+
+    assert {:ok, _} = Rice.Tasks.appoint(publisher, task, application.id)
 
     assert %{"data" => [%{"id" => task_id}]} =
              conn
@@ -59,6 +67,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
       |> post(~p"/api/tasks", %{
         title: "整理村史",
         description: "完成文字稿",
+        client_request_id: "task-main-flow",
         reward_amount: 60
       })
       |> json_response(201)
@@ -148,6 +157,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
 
     assert Enum.map(completed["data"]["events"], &{&1["from_status"], &1["to_status"]}) == [
              {nil, "open"},
+             {"open", "open"},
              {"open", "in_progress"},
              {"in_progress", "under_review"},
              {"under_review", "in_progress"},
@@ -207,6 +217,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
       |> post(~p"/api/tasks", %{
         title: "任务草稿",
         description: "发布前不可见",
+        client_request_id: "task-draft-flow",
         status: "draft"
       })
       |> json_response(201)
@@ -282,5 +293,24 @@ defmodule RiceWeb.Api.TaskControllerTest do
              |> json_response(200)
 
     assert task_id == task.id
+  end
+
+  test "发布必须带请求标识，重复同一发布请求不会创建新任务或重复冻结" do
+    publisher = task_publisher_fixture()
+    {:ok, _} = Rice.Grains.grant(publisher, 100)
+    {:ok, token} = Rice.Accounts.issue_token(publisher)
+    attrs = %{title: "网络重试的任务", description: "重试同一次发布", reward_amount: 60}
+
+    assert build_conn() |> authed(token) |> post(~p"/api/tasks", attrs) |> json_response(422)
+    request = Map.put(attrs, :client_request_id, "publish-once")
+    first = build_conn() |> authed(token) |> post(~p"/api/tasks", request) |> json_response(201)
+    second = build_conn() |> authed(token) |> post(~p"/api/tasks", request) |> json_response(201)
+    assert first["data"]["id"] == second["data"]["id"]
+    assert Rice.Repo.aggregate(Rice.Tasks.Task, :count) == 1
+
+    assert %{grain_balance: 40, grain_frozen_balance: 60} =
+             Rice.Repo.get!(Rice.Accounts.User, publisher.id)
+
+    assert Rice.Repo.aggregate(Rice.Grains.Receipt, :count) == 1
   end
 end

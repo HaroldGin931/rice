@@ -10,7 +10,7 @@ defmodule Rice.Grains.Transfer do
   """
   use Rice.Schema
 
-  @kinds ~w(reward gift grant task_reward)
+  @kinds ~w(reward gift grant task_reward event_fee)
 
   schema "grain_transfers" do
     field :legacy_id, :string
@@ -60,7 +60,7 @@ defmodule Rice.Grains.Transfer do
       kind == "grant" and not is_nil(from) ->
         add_error(changeset, :from_user_id, "后台发放不应有付款方")
 
-      kind in ~w(reward gift task_reward) and is_nil(from) ->
+      kind in ~w(reward gift task_reward event_fee) and is_nil(from) ->
         add_error(changeset, :from_user_id, "缺少付款方")
 
       true ->

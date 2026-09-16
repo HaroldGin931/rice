@@ -2,7 +2,7 @@
 
 当前用户的档案。替代 core 的 `/user/login-user-detail` 和 `/user/edit-profile`。
 
-**全部接口都要登录。**
+公开搜索与资料无需登录，以下本人接口都要登录。
 
 共通约定见 [README](README.md)。
 
@@ -37,8 +37,29 @@
 `grain_balance` 是可用稻米，`grain_frozen_balance` 是已为任务奖励冻结、尚未结算或
 退回的稻米。
 
-`can_publish_tasks` 是服务端管理的任务发布权限，只出现在用户自己的档案和后台用户
-对象中。普通用户默认是 `false`，不能通过 `PATCH /api/users/me` 自行开启。
+`can_publish_tasks` 保留兼容旧档案；2026-09-15 起任务/活动发布以节点唯一管理员
+`nodes.user_id` 为准。前端通过 `/api/nodes?mine=managed` 查询可发布的社区。
+
+## `GET /api/users/search`
+
+无需登录，供全局搜索的“用户”分组使用。搜索当前 Rice 用户的昵称或 handle，
+不查询邮箱、手机号或钱包地址；不返回停用、已注销的账号。
+
+| 参数 | 说明 |
+| --- | --- |
+| `q` | 关键词；去掉两端空白后须为 1–256 个字符。缺失、空白或过长返回空列表 |
+| `limit` | 每页条数，默认 20，最多 100；前端搜索首屏传 10 |
+| `before` | 上一页的 `meta.next_cursor`，按 Rice ID 倒序继续读取 |
+
+昵称与 handle 均为不区分大小写的包含匹配。`%`、`_`、`\` 按普通字符匹配，
+不是通配符。响应 `200`：`{data: public_user[], meta: {next_cursor: string | null}}`。
+每个用户使用上述 `public` 视图，头像已加载；只有还有下一页时返回游标。
+
+## `GET /api/users/:identifier/profile`
+
+无需登录，接受 Rice ID、DID 或 handle，返回 `{data: public_user}`。
+只包含公开姓名、头像、简介和账号标识，不接受手机/邮箱查找。
+前端读取此资料作为 Rice 用户编辑结果，PDS 的关注和帖子数据仍由原服务提供。
 
 `avatar` 是附件对象或 `null`,形状见 [attachment_controller](attachment_controller.md#附件对象)。
 

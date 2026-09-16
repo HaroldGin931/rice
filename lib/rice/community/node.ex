@@ -10,6 +10,8 @@ defmodule Rice.Community.Node do
 
     belongs_to :user, Rice.Accounts.User
     belongs_to :logo, Rice.Files.Attachment
+    has_many :memberships, Rice.Community.Membership
+    has_many :applications, Rice.Community.JoinApplication
 
     timestamps()
   end

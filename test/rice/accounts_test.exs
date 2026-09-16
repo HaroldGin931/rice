@@ -160,7 +160,8 @@ defmodule Rice.AccountsTest do
             "",
             "13800000000"
           ] do
-        assert {:error, :invalid_target} = Accounts.send_verification_code("sms", bad, "register"),
+        assert {:error, :invalid_target} =
+                 Accounts.send_verification_code("sms", bad, "register"),
                "不该接受 sms target #{inspect(bad)}"
       end
 

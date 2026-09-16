@@ -2,22 +2,189 @@ defmodule Rice.Community do
   @moduledoc "节点与勋章。"
   import Ecto.Query
 
-  alias Rice.Community.{Badge, BadgeAward, Node}
+  alias Rice.Accounts.User
+  alias Rice.Community.{Badge, BadgeAward, JoinApplication, Membership, Node}
   alias Rice.{Pagination, Repo}
 
   # ── 节点 ────────────────────────────────────────────────────────────────
 
-  @doc """
-  节点列表。响应里的 `score` 是节点主的稻米余额 —— 这也是节点这块
-  不能放在期 1(只读内容)的原因:它本质上是一个对 users 的 join。
-  """
-  def list_nodes do
-    Repo.all(
-      from n in Node,
-        order_by: [asc: n.position, asc: n.id],
-        preload: [:logo, user: :avatar]
-    )
+  @doc "公开目录附带本人身份；申请读取范围仅本人或本节点管理员。"
+  def list_nodes(user \\ nil, params \\ %{}) do
+    from(n in Node, order_by: [asc: n.position, asc: n.id])
+    |> filter_node_query(params["q"])
+    |> filter_node_identity(user, params["mine"])
+    |> Repo.all()
+    |> preload_nodes(user)
   end
+
+  def fetch_node(id, user \\ nil) do
+    with true <- Rice.Tsid.valid?(id), %Node{} = node <- Repo.get(Node, id) do
+      {:ok, preload_nodes(node, user)}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp preload_nodes(nodes, user) do
+    applications =
+      from a in JoinApplication,
+        order_by: [desc: a.id],
+        preload: [user: :avatar]
+
+    applications =
+      if user do
+        from a in applications,
+          join: n in assoc(a, :node),
+          where: a.user_id == ^user.id or n.user_id == ^user.id
+      else
+        from a in applications, where: false
+      end
+
+    Repo.preload(nodes, [
+      :logo,
+      user: :avatar,
+      memberships: [user: :avatar],
+      applications: applications
+    ])
+  end
+
+  defp filter_node_query(query, q) when is_binary(q) and q != "" do
+    pattern = "%" <> String.replace(String.trim(q), ["\\", "%", "_"], &"\\#{&1}") <> "%"
+    from n in query, where: ilike(n.name, ^pattern) or ilike(n.description, ^pattern)
+  end
+
+  defp filter_node_query(query, _), do: query
+
+  defp filter_node_identity(query, nil, mine) when mine in ~w(joined pending managed identity),
+    do: from(n in query, where: false)
+
+  defp filter_node_identity(query, %User{id: user_id}, mine)
+       when mine in ~w(joined pending managed identity) do
+    memberships = from m in Membership, where: m.user_id == ^user_id, select: m.node_id
+
+    pending =
+      from a in JoinApplication,
+        where: a.user_id == ^user_id and a.status == "pending",
+        select: a.node_id
+
+    case mine do
+      "managed" ->
+        from n in query, where: n.user_id == ^user_id
+
+      "joined" ->
+        from n in query, where: n.user_id == ^user_id or n.id in subquery(memberships)
+
+      "pending" ->
+        from n in query, where: n.id in subquery(pending)
+
+      "identity" ->
+        from n in query,
+          where:
+            n.user_id == ^user_id or n.id in subquery(memberships) or n.id in subquery(pending)
+    end
+  end
+
+  defp filter_node_identity(query, _, _), do: query
+
+  @doc "入会申请与审批按节点加锁，重复提交返回原待审记录。"
+  # ponytail: serialize joins per node; use per-applicant locks if node traffic grows.
+  def apply_to_node(%User{} = user, %Node{} = node, attrs) do
+    Repo.transaction(fn ->
+      node = Repo.one!(from n in Node, where: n.id == ^node.id, lock: "FOR UPDATE")
+
+      cond do
+        is_nil(node.user_id) ->
+          Repo.rollback(:forbidden)
+
+        node.user_id == user.id ->
+          Repo.rollback(:conflict)
+
+        Repo.exists?(from m in Membership, where: m.node_id == ^node.id and m.user_id == ^user.id) ->
+          Repo.rollback(:conflict)
+
+        true ->
+          existing =
+            Repo.get_by(JoinApplication, node_id: node.id, user_id: user.id, status: "pending")
+
+          existing || create_join_application(user, node, attrs)
+      end
+    end)
+  end
+
+  defp create_join_application(user, node, attrs) do
+    application =
+      %JoinApplication{node_id: node.id, user_id: user.id}
+      |> JoinApplication.create_changeset(attrs)
+      |> Repo.insert()
+      |> write_result!()
+
+    Rice.Inbox.notify(
+      Repo,
+      node.user_id,
+      user.id,
+      "node_application_created",
+      "申请加入#{node.name}",
+      "node",
+      node.id
+    )
+    |> write_result!()
+
+    application
+  end
+
+  def review_join_application(%User{} = user, %Node{} = node, application_id, status, attrs)
+      when status in ~w(approved rejected) do
+    if Rice.Tsid.valid?(application_id) do
+      Repo.transaction(fn ->
+        node = Repo.one!(from n in Node, where: n.id == ^node.id, lock: "FOR UPDATE")
+        if node.user_id != user.id, do: Repo.rollback(:forbidden)
+
+        application = Repo.get_by(JoinApplication, id: application_id, node_id: node.id)
+
+        cond do
+          is_nil(application) -> Repo.rollback(:not_found)
+          application.status == status -> application
+          application.status != "pending" -> Repo.rollback(:conflict)
+          true -> finish_join_review(user, node, application, status, attrs)
+        end
+      end)
+    else
+      {:error, :not_found}
+    end
+  end
+
+  defp finish_join_review(user, node, application, status, attrs) do
+    application =
+      application
+      |> JoinApplication.review_changeset(user, status, attrs)
+      |> Repo.update()
+      |> write_result!()
+
+    if status == "approved" do
+      %Membership{node_id: node.id, user_id: application.user_id}
+      |> Membership.changeset()
+      |> Repo.insert(on_conflict: :nothing, conflict_target: [:node_id, :user_id])
+      |> write_result!()
+    end
+
+    detail = if status == "approved", do: "加入#{node.name}的申请已通过", else: "加入#{node.name}的申请未通过"
+
+    Rice.Inbox.notify(
+      Repo,
+      application.user_id,
+      user.id,
+      "node_application_#{status}",
+      detail,
+      "node",
+      node.id
+    )
+    |> write_result!()
+
+    application
+  end
+
+  defp write_result!({:ok, value}), do: value
+  defp write_result!({:error, reason}), do: Repo.rollback(reason)
 
   @doc "节点用户列表(原 /user/node-user-list)。"
   def list_node_members do

@@ -4,6 +4,7 @@ defmodule Rice.Fixtures do
   一个带默认值的 map merge 就够读了。
   """
   alias Rice.Repo
+  import Ecto.Query
 
   def user_fixture(attrs \\ %{}) do
     n = System.unique_integer([:positive])
@@ -28,10 +29,14 @@ defmodule Rice.Fixtures do
   end
 
   def task_publisher_fixture(attrs \\ %{}) do
-    attrs
-    |> user_fixture()
-    |> Ecto.Changeset.change(can_publish_tasks: true)
-    |> Repo.update!()
+    publisher =
+      attrs
+      |> user_fixture()
+      |> Ecto.Changeset.change(can_publish_tasks: true)
+      |> Repo.update!()
+
+    node_fixture(%{user_id: publisher.id})
+    publisher
   end
 
   def task_fixture(creator, attrs \\ %{}) do
@@ -43,7 +48,12 @@ defmodule Rice.Fixtures do
         description: "完成任务#{n}的交付说明"
       })
 
-    %Rice.Tasks.Task{creator_id: creator.id}
+    node_id =
+      attrs[:node_id] ||
+        (Repo.one(from n in Rice.Community.Node, where: n.user_id == ^creator.id, limit: 1) ||
+           node_fixture(%{user_id: creator.id})).id
+
+    %Rice.Tasks.Task{creator_id: creator.id, node_id: node_id}
     |> Rice.Tasks.Task.create_changeset(attrs)
     |> Repo.insert!()
   end

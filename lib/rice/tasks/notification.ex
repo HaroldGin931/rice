@@ -2,9 +2,9 @@ defmodule Rice.Tasks.Notification do
   @moduledoc "任务状态变化发给相关用户的站内通知。"
   use Rice.Schema
 
-  @events ~w(application_created assignee_appointed application_not_selected task_cancelled task_expired result_submitted result_approved changes_requested)
-
   schema "task_notifications" do
+    field(:subject_type, :string)
+    field(:subject_id, :string)
     field(:event, :string)
     field(:detail, :string)
     field(:read_at, :utc_datetime_usec)
@@ -18,9 +18,17 @@ defmodule Rice.Tasks.Notification do
 
   def create_changeset(notification, attrs) do
     notification
-    |> cast(attrs, [:task_id, :recipient_id, :actor_id, :event, :detail])
-    |> validate_required([:task_id, :recipient_id, :actor_id, :event])
-    |> validate_inclusion(:event, @events)
+    |> cast(attrs, [
+      :task_id,
+      :recipient_id,
+      :actor_id,
+      :event,
+      :detail,
+      :subject_type,
+      :subject_id
+    ])
+    |> validate_required([:recipient_id, :actor_id, :event])
+    |> validate_length(:event, max: 32)
     |> update_change(:detail, &optional_trim/1)
     |> validate_length(:detail, max: 512)
     |> foreign_key_constraint(:task_id)

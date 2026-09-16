@@ -38,20 +38,31 @@ defmodule RiceWeb.Api.TaskJSON do
       id: task.id,
       title: task.title,
       description: task.description,
+      attachments:
+        Enum.map(loaded(task.image_links), &RiceWeb.Api.AttachmentJSON.embed(&1.attachment)),
+      requirement: task.requirement,
+      node: RiceWeb.Api.NodeJSON.embed(task.node),
+      execution_deadline: task.execution_deadline,
+      application_closed: past?(task.application_deadline),
+      overdue: task.status in ["in_progress", "under_review"] and past?(task.execution_deadline),
       status: task.status,
       creator: public_user(task.creator),
       assignee: public_user(task.assignee),
       application_deadline: task.application_deadline,
       appointed_at: task.appointed_at,
-      appointment_reason: task.appointment_reason,
+      appointment_reason:
+        if(current_user && current_user.id in [task.creator_id, task.assignee_id],
+          do: task.appointment_reason
+        ),
       reward_amount: task.reward_amount,
       reward_status: task.reward_status,
       application_count: length(applications),
       my_application_status: my_application_status(task, applications, current_user),
+      my_application: my_application(task, applications, current_user),
       allowed_actions: allowed_actions(task, applications, current_user),
       applications: visible_applications(task, applications, current_user, detail?),
       submissions: visible_submissions(task, submissions, current_user, detail?),
-      events: if(detail?, do: Enum.map(events, &event/1), else: nil),
+      events: if(detail?, do: visible_events(task, events, current_user), else: nil),
       published_at: published_at(task, events),
       inserted_at: task.inserted_at,
       updated_at: task.updated_at
@@ -95,6 +106,32 @@ defmodule RiceWeb.Api.TaskJSON do
     }
   end
 
+  defp my_application(_task, _applications, nil), do: nil
+
+  defp my_application(task, applications, user) do
+    case Enum.find(applications, &(&1.user_id == user.id)) do
+      nil -> nil
+      own -> application(own, task)
+    end
+  end
+
+  defp visible_events(task, events, user) do
+    private? = user && user.id in [task.creator_id, task.assignee_id]
+
+    events
+    |> Enum.filter(fn e ->
+      e.detail != "收到任务申请" || (user && user.id in [task.creator_id, e.actor_id])
+    end)
+    |> Enum.filter(fn e -> private? || e.from_status != e.to_status || e.detail == "申请已截止" end)
+    |> Enum.map(fn e ->
+      rendered = event(e)
+      if private?, do: rendered, else: %{rendered | detail: nil}
+    end)
+  end
+
+  defp past?(nil), do: false
+  defp past?(time), do: DateTime.compare(time, DateTime.utc_now()) != :gt
+
   defp event(%Event{} = event) do
     %{
       id: event.id,
@@ -112,7 +149,8 @@ defmodule RiceWeb.Api.TaskJSON do
     []
     |> maybe_add(task.status == "draft" and task.creator_id == user_id, "publish")
     |> maybe_add(
-      task.status == "open" and task.creator_id != user_id and
+      task.status == "open" and not past?(task.application_deadline) and
+        task.creator_id != user_id and
         not Enum.any?(applications, &(&1.user_id == user_id)),
       "apply"
     )
@@ -121,7 +159,7 @@ defmodule RiceWeb.Api.TaskJSON do
         applications != [],
       "appoint"
     )
-    |> maybe_add(task.status == "open" and task.creator_id == user_id, "cancel")
+    |> maybe_add(task.status in ["open", "draft"] and task.creator_id == user_id, "cancel")
     |> maybe_add(task.status == "in_progress" and task.assignee_id == user_id, "submit_result")
     |> maybe_add(task.status == "under_review" and task.creator_id == user_id, "approve_result")
     |> maybe_add(task.status == "under_review" and task.creator_id == user_id, "request_changes")

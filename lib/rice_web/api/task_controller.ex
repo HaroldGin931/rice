@@ -20,10 +20,16 @@ defmodule RiceWeb.Api.TaskController do
   end
 
   def create(conn, params) do
-    with {:ok, task} <- Tasks.create_task(conn.assigns.current_user, params) do
+    key = params["client_request_id"]
+
+    with true <- is_binary(key) and byte_size(key) in 1..128,
+         {:ok, task} <- Tasks.create_task(conn.assigns.current_user, params) do
       conn
       |> put_status(:created)
       |> render(:show, task: task, current_user: conn.assigns.current_user)
+    else
+      false -> {:error, :missing_request_id}
+      error -> error
     end
   end
 

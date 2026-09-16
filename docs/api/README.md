@@ -15,7 +15,7 @@
 | [registration](registration_controller.md) | `RegistrationController` | 注册(两步) |
 | [session](session_controller.md) | `SessionController` | 登录 / 登出 |
 | [password](password_controller.md) | `PasswordController` | 忘记密码 |
-| [user](user_controller.md) | `UserController` | 自己的档案、改绑、注销 |
+| [user](user_controller.md) | `UserController` | 公开用户搜索与资料、自己的档案、改绑、注销 |
 | [attachment](attachment_controller.md) | `AttachmentController` | 附件上传与读取 |
 | [app](app_controller.md) | `AppController` | 应用入口 |
 | [banner](banner_controller.md) | `BannerController` | 轮播位 |
@@ -29,6 +29,8 @@
 | [proposal_vote](proposal_vote_controller.md) | `ProposalVoteController` | 投票 |
 | [proposal_comment](proposal_comment_controller.md) | `ProposalCommentController` | 提案评论 |
 | [task](task_controller.md) | `TaskController` | Task V1 发布、申请、任命、提交与审核 |
+| [event](event_controller.md) | `EventController` | 活动候选审批、名额、自动开始与结算 |
+| [wallet 与通知](wallet_and_inbox.md) | `WalletController` / `InboxController` | 本人的资金凭证、累计获得与业务通知 |
 
 ### 浏览器流程(不在 `/api` 下)
 

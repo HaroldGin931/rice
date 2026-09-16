@@ -85,6 +85,73 @@ defmodule Rice.TasksTest do
     assert Repo.aggregate(Rice.Tasks.Task, :count) == 0
   end
 
+  test "发布重读草稿，冻结当前金额并可按同一金额退款" do
+    publisher = task_publisher_fixture()
+    {:ok, _} = Rice.Grains.grant(publisher, 200)
+
+    {:ok, stale_draft} =
+      Tasks.create_task(publisher, %{
+        title: "更新中的草稿",
+        description: "发布时以当前约定为准",
+        status: "draft",
+        reward_amount: 80
+      })
+
+    assert {:ok, _} = Tasks.update_draft(publisher, stale_draft, %{reward_amount: 120})
+
+    assert {:ok, published} = Tasks.publish_draft(publisher, stale_draft)
+    assert published.reward_amount == 120
+
+    assert %{grain_balance: 80, grain_frozen_balance: 120} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+
+    assert %{amount: 120, kind: "reserved"} = Repo.one!(Rice.Grains.Receipt)
+    assert {:ok, _} = Tasks.cancel(publisher, published)
+
+    assert %{grain_balance: 200, grain_frozen_balance: 0} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+  end
+
+  test "草稿交付期限已过时不能发布，保留草稿且不冻结" do
+    publisher = task_publisher_fixture()
+    {:ok, _} = Rice.Grains.grant(publisher, 100)
+
+    {:ok, stale_draft} =
+      Tasks.create_task(publisher, %{
+        title: "有交付期限的草稿",
+        description: "过期应先修改",
+        status: "draft",
+        reward_amount: 60,
+        execution_deadline: DateTime.add(DateTime.utc_now(), 60, :second)
+      })
+
+    stale_draft
+    |> change(execution_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+    |> Repo.update!()
+
+    assert {:error, changeset} = Tasks.publish_draft(publisher, stale_draft)
+    assert Map.has_key?(errors_on(changeset), :execution_deadline)
+    assert Repo.get!(Rice.Tasks.Task, stale_draft.id).status == "draft"
+
+    assert %{grain_balance: 100, grain_frozen_balance: 0} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+
+    assert Repo.aggregate(Rice.Grains.Receipt, :count) == 0
+  end
+
+  test "重复申请保留同一记录，不重复事件和通知" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    task = task_fixture(publisher)
+    assert {:ok, first} = Tasks.apply(worker, task, %{reason: "可以参与"})
+    assert {:ok, repeated} = Tasks.apply(worker, task, %{reason: "重试请求"})
+    assert repeated.id == first.id
+    assert repeated.reason == "可以参与"
+    assert Repo.aggregate(Rice.Tasks.Application, :count) == 1
+    assert Repo.aggregate(Rice.Tasks.Event, :count) == 1
+    assert [%{event: "application_created"}] = Tasks.list_notifications(publisher)
+  end
+
   test "完整状态机保留驳回原因与承作人的完成历史" do
     publisher = task_publisher_fixture()
     worker = user_fixture()
@@ -133,6 +200,8 @@ defmodule Rice.TasksTest do
 
     assert Enum.map(completed.events, &{&1.from_status, &1.to_status}) == [
              {nil, "open"},
+             {"open", "open"},
+             {"open", "open"},
              {"open", "in_progress"},
              {"in_progress", "under_review"},
              {"under_review", "in_progress"},
@@ -159,16 +228,23 @@ defmodule Rice.TasksTest do
     assert Enum.all?(Tasks.list_notifications(worker), &match?(%DateTime{}, &1.read_at))
   end
 
-  test "普通用户可以发布，发布者不能申请自己的任务" do
+  test "只有社区唯一管理员可发布，管理员不能申请自己的任务" do
     user = user_fixture()
 
-    assert {:ok, task} =
-             Tasks.create_task(user, %{title: "普通用户任务", description: "所有人都能发布"})
+    assert {:error, :forbidden} =
+             Tasks.create_task(user, %{title: "普通用户任务", description: "不能发布"})
 
-    assert {:error, :forbidden} = Tasks.apply(user, task, %{})
+    publisher = task_publisher_fixture()
+    assert {:ok, task} = Tasks.create_task(publisher, %{title: "社区任务", description: "公开参与"})
+    assert {:error, :forbidden} = Tasks.apply(publisher, task, %{})
+
+    assert {:error, :forbidden} =
+             Tasks.create_task(user, %{title: "冒用社区", description: "不能发布", node_id: task.node_id})
+
+    assert {:ok, _application} = Tasks.apply(user, task, %{})
   end
 
-  test "公开列表可按任意用户的参与和发布记录筛选" do
+  test "公开履历只列已承接任务，不暴露待选申请" do
     publisher = task_publisher_fixture()
     worker = user_fixture()
     other = user_fixture()
@@ -182,8 +258,11 @@ defmodule Rice.TasksTest do
                status: "draft"
              })
 
-    assert {:ok, _application} = Tasks.apply(worker, task, %{})
+    assert {:ok, application} = Tasks.apply(worker, task, %{})
     assert {:ok, _application} = Tasks.apply(other, other_task, %{})
+
+    assert Tasks.list_tasks(nil, %{"participant_did" => worker.did}).entries == []
+    assert {:ok, _appointed} = Tasks.appoint(publisher, task, application.id)
 
     participant_tasks =
       Tasks.list_tasks(nil, %{"participant_did" => worker.did}).entries
@@ -193,6 +272,7 @@ defmodule Rice.TasksTest do
 
     assert Enum.map(participant_tasks, & &1.id) == [task.id]
     assert Enum.map(created_tasks, & &1.id) == [task.id]
+    assert Tasks.list_tasks(nil, %{"participant_did" => other.did}).entries == []
   end
 
   test "驳回必须填写原因" do
@@ -206,6 +286,40 @@ defmodule Rice.TasksTest do
 
     assert {:error, changeset} = Tasks.request_changes(publisher, task, submission.id, "   ")
     assert Map.has_key?(errors_on(changeset), :review_reason)
+  end
+
+  test "新一轮交付不能被旧结果的验收或驳回请求推进" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    {:ok, _} = Rice.Grains.grant(publisher, 100)
+
+    {:ok, task} =
+      Tasks.create_task(publisher, %{title: "反复校对", description: "以本轮交付为准", reward_amount: 60})
+
+    {:ok, application} = Tasks.apply(worker, task, %{})
+    {:ok, task} = Tasks.appoint(publisher, task, application.id)
+    {:ok, first_review} = Tasks.submit_result(worker, task, %{body: "旧版本"})
+    first_submission = Enum.find(first_review.submissions, &is_nil(&1.review_reason))
+    {:ok, returned} = Tasks.request_changes(publisher, first_review, first_submission.id, "需要补充")
+    {:ok, second_review} = Tasks.submit_result(worker, returned, %{body: "新版本"})
+    second_submission = Enum.find(second_review.submissions, &is_nil(&1.review_reason))
+
+    assert {:error, :conflict} =
+             Tasks.approve_result(publisher, first_review, first_submission.id)
+
+    assert {:error, :conflict} =
+             Tasks.request_changes(publisher, first_review, first_submission.id, "迟到的旧驳回")
+
+    assert Repo.get!(Rice.Tasks.Task, task.id).status == "under_review"
+    assert is_nil(Repo.get!(Rice.Tasks.Submission, second_submission.id).review_reason)
+
+    assert %{grain_balance: 40, grain_frozen_balance: 60} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+
+    assert Repo.get!(Rice.Accounts.User, worker.id).grain_balance == 0
+    assert {:ok, completed} = Tasks.approve_result(publisher, second_review, second_submission.id)
+    assert completed.status == "completed"
+    assert Repo.get!(Rice.Accounts.User, worker.id).grain_balance == 60
   end
 
   test "任务取消通知所有申请人" do
@@ -309,50 +423,75 @@ defmodule Rice.TasksTest do
     assert {:error, :conflict} = Tasks.apply(worker, cancelled, %{})
   end
 
-  test "领取截止后任务失效且不能继续申请" do
+  test "申请截止后停止新申请，已有候选仍可选定且截止记录不重复" do
     publisher = task_publisher_fixture()
     worker = user_fixture()
 
     assert {:ok, task} =
-             Tasks.create_task(publisher, %{title: "领取即将截止", description: "测试自动失效"})
+             Tasks.create_task(publisher, %{title: "申请即将截止", description: "保留已有候选"})
 
-    assert {:ok, _application} = Tasks.apply(worker, task, %{})
+    assert {:ok, application} = Tasks.apply(worker, task, %{})
 
     task =
       task
       |> change(application_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
       |> Repo.update!()
 
-    assert %{expired: 1} = Tasks.expire_due_tasks()
-    assert {:ok, expired} = Tasks.fetch_task(task.id, worker)
-    assert expired.status == "expired"
-    assert Enum.map(expired.events, & &1.to_status) == ["open", "expired"]
-    assert {:error, :conflict} = Tasks.apply(worker, expired, %{})
-    assert [%{event: "task_expired"}] = Tasks.list_notifications(worker)
+    assert {:ok, _} = Tasks.check_due_tasks()
+    assert {:ok, _} = Tasks.check_due_tasks()
+    assert {:ok, closed} = Tasks.fetch_task(task.id, worker)
+    assert closed.status == "open"
+    assert Enum.count(closed.events, &(&1.detail == "申请已截止")) == 1
+    assert Enum.all?(closed.events, &(&1.to_status == "open"))
+    assert {:error, :conflict} = Tasks.apply(user_fixture(), closed, %{})
+    assert Tasks.list_notifications(worker) == []
     assert [history] = Tasks.list_tasks(worker, %{"mine" => "applied"}).entries
     assert history.id == task.id
+    assert {:ok, appointed} = Tasks.appoint(publisher, closed, application.id)
+    assert appointed.status == "in_progress"
     assert :ok = Rice.Workers.ExpireTasks.perform(%Oban.Job{args: %{}})
   end
 
-  test "有奖励的任务失效后退回冻结稻米" do
+  test "申请截止不解冻，执行逾期保留承接人和报酬" do
     publisher = task_publisher_fixture()
     {:ok, _} = Rice.Grains.grant(publisher, 100)
 
     assert {:ok, task} =
              Tasks.create_task(publisher, %{
-               title: "到期退回",
-               description: "无人领取",
+               title: "到期保留",
+               description: "保持原有约定",
                reward_amount: 70
              })
+
+    worker = user_fixture()
+    assert {:ok, application} = Tasks.apply(worker, task, %{})
 
     task
     |> change(application_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
     |> Repo.update!()
 
-    assert %{expired: 1} = Tasks.expire_due_tasks()
-    assert %{reward_status: "refunded"} = Repo.get!(Rice.Tasks.Task, task.id)
+    assert {:ok, _} = Tasks.check_due_tasks()
+    assert %{status: "open", reward_status: "reserved"} = Repo.get!(Rice.Tasks.Task, task.id)
 
-    assert %{grain_balance: 100, grain_frozen_balance: 0} =
+    assert %{grain_balance: 30, grain_frozen_balance: 70} =
+             Repo.get!(Rice.Accounts.User, publisher.id)
+
+    # 已选人后的交付逾期只记录状态，不能自动取消或发放报酬。
+    assert {:ok, assigned} = Tasks.appoint(publisher, task, application.id)
+
+    assigned
+    |> change(execution_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+    |> Repo.update!()
+
+    assert {:ok, _} = Tasks.check_due_tasks()
+    assert {:ok, _} = Tasks.check_due_tasks()
+    assert {:ok, overdue} = Tasks.fetch_task(task.id, worker)
+    assert overdue.status == "in_progress"
+    assert overdue.assignee_id == worker.id
+    assert Enum.count(overdue.events, &(&1.detail == "执行已逾期，请联系发布者协调")) == 1
+    assert Enum.count(Tasks.list_notifications(worker), &(&1.event == "task_overdue")) == 1
+
+    assert %{grain_balance: 30, grain_frozen_balance: 70} =
              Repo.get!(Rice.Accounts.User, publisher.id)
   end
 

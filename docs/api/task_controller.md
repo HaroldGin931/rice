@@ -2,16 +2,16 @@
 
 Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不绕 PDS、Relay 或 AppView。
 
-这一版实现：单份草稿、发布、申请领取、发布者从申请人中任命、任命前取消、领取截止
-后失效、承作人提交结果、发布者认可结果，或「不认可结果并说明理由」后由同一承作人重新提交。
-任务详情公开返回状态变化记录；申请、任命、取消、失效、提交与审核同时产生 Rice 站内通知。
+2026-09-15：单份草稿、节点唯一管理员发布、公开申请、选定一人、任命前取消、成果提交、
+退回重交和一次验收发放。申请截止只关闭新申请，不失效、不退款；执行逾期保留人和冻结款。
+任务详情返回可见范围内的状态记录，申请及业务动作产生 Rice 站内通知。
 
-**不实现**指定用户邀约、协作人、执行进度、监督人、争议协调、任务附件、任命后的取消/
-退出/延期、节点稻米池和写入 PDS。这些能力不属于当前范围。
+**不实现**指定用户邀约、协作人、执行进度、监督人、争议协调、成果附件、任命后的取消/
+退出/延期、额外资金池和写入 PDS。这些能力不属于当前范围。
 
 任务奖励由发布者自己的可用稻米承担。任务发布时冻结；结果被认可时发给承作人并生成
-`task_reward` 流水；任务在任命前取消或失效时退回发布者。节点稻米池仍固定为 `0`，
-不参与当前结算。
+`task_reward` 流水；任务在任命前取消时退回发布者。`nodes.user_id` 是唯一管理员及出资人，
+社区和管理员使用同一账户，不另外建立社区余额。每笔冻结与其退款或结算有唯一凭证。
 
 共通约定见 [README](README.md)。
 
@@ -20,11 +20,11 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 | API 值 | 界面文案 | 下一步 |
 | --- | --- | --- |
 | `draft` | 草稿 | 发布者发布；只有发布者本人可见 |
-| `open` | 可领取 | 用户申请，发布者任命 |
+| `open` | 招募中 | 截止前用户申请；发布者可继续从已有候选中选人 |
 | `in_progress` | 进行中 | 承作人提交结果 |
 | `under_review` | 待验收 | 发布者认可结果，或不认可并说明理由 |
 | `completed` | 已完成 | 终态；继续出现在承作人的历史记录 |
-| `expired` | 已失效 | 领取截止前无人获任命；终态 |
+| `expired` | 已结束 | 仅兼容旧记录；新规则不产生此状态 |
 | `cancelled` | 已取消 | 发布者在任命前取消；终态 |
 
 不认可结果不会更换承作人：任务回到 `in_progress`，旧提交与不认可理由保留。
@@ -57,7 +57,13 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 ```
 
 `reward_status` 为 `none|reserved|settled|refunded`：草稿或零奖励任务是 `none`；发布后的
-正数奖励是 `reserved`；认可结果后是 `settled`；取消或失效后是 `refunded`。
+正数奖励是 `reserved`；认可结果后是 `settled`；取消后是 `refunded`。
+
+对象另外返回 `node`、`requirement`、`execution_deadline`、`application_closed`、`overdue`，
+以及当前用户的 `my_application`（含本人理由与状态）。`appointment_reason` 只返回给发布者和承接者。
+
+正文图片由创建/草稿编辑请求的 `attachment_ids` 指定，最多 4 张、按数组顺序；列表和详情
+均返回有序 `attachments`。上传归属、替换/移除及 URL 规则见 [正文图片](attachment_controller.md#任务与活动正文图片)。
 
 `published_at` 取任务第一次进入 `open` 的状态事件时间；草稿为 `null`。`inserted_at`
 仍表示任务或草稿最初创建的时间。
@@ -69,6 +75,8 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 `events` 只在详情响应出现，按时间正序包含 `from_status`、`to_status`、可选 `detail`、
 可选 `actor` 和 `inserted_at`。迁移前已经存在的任务以一条“状态记录从这里开始”
 作为历史起点，不伪造此前无法还原的迁移过程。
+申请事件仅发布者或该申请人可见，承接者不能通过事件列表查看其他候选人身份。
+公开进展不含选人说明、验收退回理由等私有内容。
 
 ## 读取
 
@@ -78,17 +86,25 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 - `GET /api/tasks?mine=assigned|created|applied`：登录时按关系筛选。被任命后，任务从
   `applied` 移到 `assigned`；未获任命、任务取消或失效的申请仍保留在 `applied` 历史中。
   `assigned` 包含已完成任务，因此承作人的历史记录不会因重新登录而丢失。
+- `node_id` 筛选社区；`available=true` 根据当前用户、截止及是否已申请筛出可申请任务。
+- `creator_did` 查公开发布履历；`participant_did` 只查实际承接履历，不公开未入选申请。
 
 ## 写入（全部需要 C 端登录）
 
 ### `POST /api/tasks`
 
-只有 `user.can_publish_tasks=true` 才能发布。
+只有目标节点 `nodes.user_id` 指向的用户才能发布；不再以全局 `can_publish_tasks` 开关授权。
+传 `node_id`；省略时仅在该用户恰好管理一个节点时推导。每次创建须传非空、最多 128 字节的
+`client_request_id`，同一用户以同一标识重试返回原任务，不能重新冻结。
 
 ```json
 {
   "title":"整理村史访谈",
+  "node_id":"节点 TSID",
+  "client_request_id":"本次创建的固定 UUID",
   "description":"完成访谈文字稿并校对",
+  "attachment_ids":[],
+  "requirement":"交付校对后的文字稿",
   "status":"open",
   "application_deadline":"2026-09-10T12:00:00Z",
   "reward_amount":120
@@ -104,15 +120,17 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 仅发布者可以修改自己的 `draft`。请求字段与创建任务相同，但不接收 `status`。前端读取
 唯一草稿后直接继续编辑同一条任务，不会复制出第二条草稿；草稿阶段修改奖励不会冻结。
 草稿一旦发布，继续修改返回 `409`。
+草稿的所属节点固定；可改 `requirement`、`execution_deadline`，交付截止应晚于现在及申请截止。
 
 ### `POST /api/tasks/:task_id/publish`
 
 仅发布者可以把自己的 `draft` 发布为 `open`。正数奖励在同一事务里冻结；余额不足或领取
-截止已经过去返回 `422`，任务仍保持草稿。
+截止或交付截止已经过去返回 `422`，任务仍保持草稿。发布时锁定并重读当前草稿，避免编辑与
+发布并发时使用旧金额。已发布任务重试返回原任务。
 
 ### `POST /api/tasks/:task_id/cancel`
 
-仅发布者可在 `open`、尚未任命时取消。成功后进入 `cancelled`，冻结奖励在同一事务退回；
+仅发布者可在 `draft` 或 `open`、尚未任命时取消。成功后进入 `cancelled`，冻结奖励在同一事务退回；
 任命后返回 `409`。
 
 ### `POST /api/tasks/:task_id/applications`
@@ -121,7 +139,8 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 {"reason":"做过两次口述史整理，本周可以完成。"}
 ```
 
-理由选填，最长 512。不能申请自己的任务；同一用户同一任务只能申请一次。
+理由选填，最长 512。不能申请自己的任务；同一用户同一任务只有一份申请，开放期内重复请求
+返回原申请且不重复通知。无需先加入社区。申请截止后返回 `409`。
 
 ### `POST /api/tasks/:task_id/applications/:application_id/appoint`
 
@@ -159,11 +178,11 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 承作人不变，可再次提交。提交的 `pending|approved|changes_requested` 状态由任务状态与
 不认可理由计算，不额外维护一份容易失配的状态字段。
 
-## 自动失效
+## 截止与逾期
 
-`application_deadline` 到期且任务仍为 `open` 时进入 `expired`。Oban 每分钟执行一次；
-列表或详情读取也会幂等补偿一次，因此后台任务暂时关闭的本地环境不会继续接受过期申请。
-冻结奖励会退回发布者；所有申请人会收到 `task_expired` 通知，任务仍保留在各自申请历史中。
+`application_deadline` 到期后服务端拒绝新申请；已有候选仍可被任命。Oban 每分钟补一条
+“申请已截止”记录，不修改状态或余额。执行逾期也只记一次事件并通知承接者，不自动付款、
+取消、延期或更换承接者。GET 为纯读取；关闭新申请的判断直接使用当前时间，不依赖定时器已运行。
 
 ## 任务通知
 
@@ -171,8 +190,8 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 - `POST /api/task_notifications/read`：把当前用户未读任务通知标记为已读，成功返回 `204`。
 
 通知事件包括 `application_created`、`assignee_appointed`、`application_not_selected`、
-`task_cancelled`、`task_expired`、`result_submitted`、`result_approved` 和
-`changes_requested`。这些通知只写 Rice，不写 PDS。
+`task_cancelled`、`task_overdue`、`result_submitted`、`result_approved` 和
+`changes_requested`。新前端统一使用 [业务通知](wallet_and_inbox.md)；旧任务通知读取路径仍可用。
 
 ## 状态冲突
 

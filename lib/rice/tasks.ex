@@ -1,9 +1,8 @@
 defmodule Rice.Tasks do
   @moduledoc """
-  任务状态机：草稿、发布、申请领取、任命、取消、失效、提交与审核。
+  社区单人任务：草稿、发布、申请、任命、交付与验收。
 
-  任务奖励由发布者的 Rice 可用余额冻结；完成时发给承作人，取消或失效时退回。
-  节点稻米池不参与这条链路。
+  唯一管理员代表节点发布并出资；申请截止仅关闭新申请，原冻结款保留。
   """
   import Ecto.Query
 
@@ -13,13 +12,13 @@ defmodule Rice.Tasks do
   alias Rice.{Grains, Pagination, Repo}
 
   def list_tasks(user, params \\ %{}) do
-    expire_due_tasks()
-
     query =
       from(t in Task, as: :task)
       |> scope_visibility(user, params["mine"])
       |> filter_status(params["status"])
       |> filter_query(params["q"])
+      |> filter_node(params["node_id"])
+      |> filter_available(user, params["available"])
       |> scope_public_user(params["participant_did"], params["creator_did"])
       |> scope_mine(user, params["mine"])
 
@@ -29,8 +28,6 @@ defmodule Rice.Tasks do
   end
 
   def fetch_task(id, user \\ nil) do
-    expire_due_task(id)
-
     with {:ok, task} <- fetch_task_record(id),
          true <- visible_to?(task, user) do
       {:ok, task}
@@ -52,9 +49,64 @@ defmodule Rice.Tasks do
   end
 
   def create_task(%User{} = user, attrs) do
+    Repo.transaction(fn ->
+      Repo.one!(from u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
+
+      with {:ok, node} <- publishing_node(user, attrs["node_id"] || attrs[:node_id]) do
+        key = attrs["client_request_id"] || attrs[:client_request_id]
+
+        existing =
+          if is_binary(key) && key != "",
+            do: Repo.get_by(Task, creator_id: user.id, client_request_id: key)
+
+        if existing do
+          preload_detail(existing)
+        else
+          case create_new_task(user, node, attrs) do
+            {:ok, task} -> task
+            {:error, reason} -> Repo.rollback(reason)
+          end
+        end
+      else
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
+
+  defp publishing_node(user, nil) do
+    case Repo.all(from n in Rice.Community.Node, where: n.user_id == ^user.id, limit: 2) do
+      [node] -> {:ok, node}
+      _ -> {:error, :forbidden}
+    end
+  end
+
+  defp publishing_node(user, id) do
+    if Rice.Tsid.valid?(id) do
+      case Repo.get_by(Rice.Community.Node, id: id, user_id: user.id) do
+        nil -> {:error, :forbidden}
+        node -> {:ok, node}
+      end
+    else
+      {:error, :forbidden}
+    end
+  end
+
+  defp create_new_task(user, node, attrs) do
     with {:ok, status} <- initial_status(attrs) do
+      # Do not wait on the draft unique index while holding the payer lock:
+      # publishing that draft needs the same payer lock to reserve its reward.
+      if status == "draft" and
+           Repo.exists?(
+             from t in Task,
+               where: t.creator_id == ^user.id and t.status == "draft"
+           ) do
+        Repo.rollback(
+          Ecto.Changeset.add_error(Ecto.Changeset.change(%Task{}), :creator_id, "已有草稿，请继续编辑")
+        )
+      end
+
       task_changeset =
-        %Task{creator_id: user.id, status: status}
+        %Task{creator_id: user.id, node_id: node.id, status: status}
         |> Task.create_changeset(attrs)
 
       reward_amount = Ecto.Changeset.get_field(task_changeset, :reward_amount) || 0
@@ -70,7 +122,9 @@ defmodule Rice.Tasks do
       |> Multi.insert(:task, task_changeset)
       |> maybe_run_reward(
         if status == "open" and reward_amount > 0 do
-          fn repo, _changes -> Grains.reserve_task_reward(repo, user.id, reward_amount) end
+          fn repo, %{task: task} ->
+            Grains.reserve_business(repo, user.id, reward_amount, "rice://tasks/#{task.id}")
+          end
         end
       )
       |> Multi.insert(:event, fn %{task: task} ->
@@ -85,61 +139,69 @@ defmodule Rice.Tasks do
     end
   end
 
-  def update_draft(
-        %User{id: creator_id},
-        %Task{creator_id: creator_id, status: "draft"} = task,
-        attrs
-      ) do
-    changeset = Task.create_changeset(task, attrs)
+  def update_draft(user, task, attrs) do
+    with_locked_task(task.id, &update_current_draft(user, &1, attrs))
+  end
 
-    if changeset.valid? do
-      update_task(
-        from(t in Task, where: t.id == ^task.id and t.status == "draft"),
-        task.id,
-        title: Ecto.Changeset.get_field(changeset, :title),
-        description: Ecto.Changeset.get_field(changeset, :description),
-        application_deadline: Ecto.Changeset.get_field(changeset, :application_deadline),
-        reward_amount: Ecto.Changeset.get_field(changeset, :reward_amount)
-      )
-    else
-      {:error, changeset}
+  defp update_current_draft(
+         %User{id: creator_id},
+         %Task{creator_id: creator_id, status: "draft"} = task,
+         attrs
+       ) do
+    attrs = Map.drop(attrs, ["client_request_id", :client_request_id])
+
+    with {:ok, updated} <- task |> Task.create_changeset(attrs) |> Repo.update() do
+      {:ok, preload_detail(updated)}
     end
   end
 
-  def update_draft(%User{id: creator_id}, %Task{creator_id: creator_id}, _attrs),
+  defp update_current_draft(%User{id: creator_id}, %Task{creator_id: creator_id}, _attrs),
     do: {:error, :conflict}
 
-  def update_draft(%User{}, %Task{}, _attrs), do: {:error, :forbidden}
+  defp update_current_draft(%User{}, %Task{}, _attrs), do: {:error, :forbidden}
 
-  def publish_draft(
-        %User{id: creator_id},
-        %Task{creator_id: creator_id, status: "draft"} = task
-      ) do
-    case Task.publish_changeset(task) do
-      %{valid?: true} ->
-        {updates, detail, reward_step} = reserve_reward(task)
+  def publish_draft(user, %Task{} = task) do
+    with_locked_task(task.id, &publish_current_draft(user, &1))
+  end
 
-        transition_task(
-          from(t in Task, where: t.id == ^task.id and t.status == "draft"),
-          task,
-          updates,
-          creator_id,
-          detail,
-          [],
-          reward_step
-        )
+  defp publish_current_draft(
+         %User{id: creator_id},
+         %Task{creator_id: creator_id, status: "draft"} = task
+       ) do
+    with {:ok, _node} <- publishing_node(%User{id: creator_id}, task.node_id) do
+      case Task.publish_changeset(task) do
+        %{valid?: true} ->
+          {updates, detail, reward_step} = reserve_reward(task)
 
-      changeset ->
-        {:error, changeset}
+          transition_task(
+            from(t in Task, where: t.id == ^task.id and t.status == "draft"),
+            task,
+            updates,
+            creator_id,
+            detail,
+            [],
+            reward_step
+          )
+
+        changeset ->
+          {:error, changeset}
+      end
     end
   end
 
-  def publish_draft(%User{id: creator_id}, %Task{creator_id: creator_id}),
+  defp publish_current_draft(
+         %User{id: creator_id},
+         %Task{creator_id: creator_id, status: "open"} = task
+       ),
+       do: {:ok, preload_detail(task)}
+
+  defp publish_current_draft(%User{id: creator_id}, %Task{creator_id: creator_id}),
     do: {:error, :conflict}
 
-  def publish_draft(%User{}, %Task{}), do: {:error, :forbidden}
+  defp publish_current_draft(%User{}, %Task{}), do: {:error, :forbidden}
 
-  def cancel(%User{id: creator_id}, %Task{creator_id: creator_id, status: "open"} = task) do
+  def cancel(%User{id: creator_id}, %Task{creator_id: creator_id, status: status} = task)
+      when status in ["open", "draft"] do
     {updates, detail, reward_step} = refund_reward(task, "cancelled")
 
     notifications =
@@ -148,7 +210,7 @@ defmodule Rice.Tasks do
       end
 
     transition_task(
-      from(t in Task, where: t.id == ^task.id and t.status == "open"),
+      from(t in Task, where: t.id == ^task.id and t.status == ^status),
       task,
       updates,
       creator_id,
@@ -172,18 +234,33 @@ defmodule Rice.Tasks do
 
     Multi.new()
     |> Multi.run(:task, fn repo, _ -> lock_open_task(repo, task.id, now) end)
-    |> Multi.insert(:application, application)
-    |> Multi.insert(
-      :notification,
-      fn %{task: current_task} ->
-        notification_changeset(
-          current_task,
-          current_task.creator_id,
-          user.id,
-          "application_created"
-        )
+    |> Multi.run(:existing_application, fn repo, _ ->
+      {:ok, repo.get_by(Application, task_id: task.id, user_id: user.id)}
+    end)
+    |> Multi.run(:application, fn repo, %{existing_application: existing} ->
+      case existing do
+        nil -> repo.insert(application)
+        existing -> {:ok, existing}
       end
-    )
+    end)
+    |> Multi.run(:application_event, fn repo, %{existing_application: existing} ->
+      if existing,
+        do: {:ok, :already_applied},
+        else: repo.insert(event_changeset(task.id, user.id, "open", "open", "收到任务申请"))
+    end)
+    |> Multi.run(:notification, fn repo, %{task: current_task, existing_application: existing} ->
+      if existing,
+        do: {:ok, :already_applied},
+        else:
+          repo.insert(
+            notification_changeset(
+              current_task,
+              current_task.creator_id,
+              user.id,
+              "application_created"
+            )
+          )
+    end)
     |> Repo.transaction()
     |> case do
       {:ok, %{application: application}} ->
@@ -291,9 +368,11 @@ defmodule Rice.Tasks do
   def submit_result(%User{}, %Task{}, _attrs), do: {:error, :forbidden}
 
   def approve_result(user, %Task{} = task, submission_id) do
-    with {:ok, submission} <- fetch_record(Submission, task.id, submission_id) do
-      approve_submission(user, task, submission)
-    end
+    with_locked_task(task.id, fn current_task ->
+      with {:ok, submission} <- fetch_record(Submission, current_task.id, submission_id) do
+        approve_submission(user, current_task, submission)
+      end
+    end)
   end
 
   defp approve_submission(
@@ -321,9 +400,11 @@ defmodule Rice.Tasks do
   defp approve_submission(%User{}, %Task{}, %Submission{}), do: {:error, :forbidden}
 
   def request_changes(user, %Task{} = task, submission_id, reason) do
-    with {:ok, submission} <- fetch_record(Submission, task.id, submission_id) do
-      request_submission_changes(user, task, submission, reason)
-    end
+    with_locked_task(task.id, fn current_task ->
+      with {:ok, submission} <- fetch_record(Submission, current_task.id, submission_id) do
+        request_submission_changes(user, current_task, submission, reason)
+      end
+    end)
   end
 
   defp request_submission_changes(
@@ -374,21 +455,50 @@ defmodule Rice.Tasks do
   defp request_submission_changes(%User{}, %Task{}, %Submission{}, _),
     do: {:error, :forbidden}
 
-  def expire_due_tasks(now \\ DateTime.utc_now()) do
-    expired =
-      from(t in Task,
-        where:
-          t.status == "open" and not is_nil(t.application_deadline) and
-            t.application_deadline <= ^now
-      )
-      |> expire_tasks(now)
+  def check_due_tasks(now \\ DateTime.utc_now()) do
+    due = from(t in Task, where: t.status in ["open", "in_progress", "under_review"])
 
-    %{expired: expired}
+    Repo.transaction(fn ->
+      for task <- Repo.all(from t in due, lock: "FOR UPDATE SKIP LOCKED") do
+        detail =
+          cond do
+            (task.status == "open" and task.application_deadline) &&
+                DateTime.compare(task.application_deadline, now) != :gt ->
+              "申请已截止"
+
+            (task.status in ["in_progress", "under_review"] and task.execution_deadline) &&
+                DateTime.compare(task.execution_deadline, now) != :gt ->
+              "执行已逾期，请联系发布者协调"
+
+            true ->
+              nil
+          end
+
+        if detail &&
+             not Repo.exists?(
+               from e in Event, where: e.task_id == ^task.id and e.detail == ^detail
+             ) do
+          Repo.insert!(event_changeset(task.id, nil, task.status, task.status, detail))
+
+          if task.assignee_id,
+            do:
+              Repo.insert!(
+                notification_changeset(
+                  task,
+                  task.assignee_id,
+                  task.creator_id,
+                  "task_overdue",
+                  detail
+                )
+              )
+        end
+      end
+    end)
   end
 
   def list_notifications(%User{id: user_id}) do
     from(n in Notification,
-      where: n.recipient_id == ^user_id,
+      where: n.recipient_id == ^user_id and not is_nil(n.task_id),
       order_by: [desc: n.id],
       limit: 50,
       preload: [actor: :avatar, task: []]
@@ -438,6 +548,34 @@ defmodule Rice.Tasks do
   end
 
   defp filter_query(query, _), do: query
+
+  defp filter_node(query, nil), do: query
+
+  defp filter_node(query, id) do
+    if Rice.Tsid.valid?(id),
+      do: from(t in query, where: t.node_id == ^id),
+      else: from(t in query, where: false)
+  end
+
+  defp filter_available(query, %User{id: id}, value) when value in [true, "true", "1"] do
+    now = DateTime.utc_now()
+
+    applied =
+      from a in Application,
+        where: a.task_id == parent_as(:task).id and a.user_id == ^id,
+        select: 1
+
+    from(t in query,
+      where:
+        t.status == "open" and t.creator_id != ^id and not exists(applied) and
+          (is_nil(t.application_deadline) or t.application_deadline > ^now)
+    )
+  end
+
+  defp filter_available(query, nil, value) when value in [true, "true", "1"],
+    do: from(t in query, where: false)
+
+  defp filter_available(query, _, _), do: query
 
   defp paginate_tasks(query, %{"sort" => "published"} = params) do
     %{limit: limit, before: before} = Pagination.params(params)
@@ -494,15 +632,7 @@ defmodule Rice.Tasks do
   end
 
   defp scope_participant(query, did) when is_binary(did) and did != "" do
-    application =
-      from(a in Application,
-        join: user in User,
-        on: user.id == a.user_id,
-        where: a.task_id == parent_as(:task).id and user.did == ^did,
-        select: 1
-      )
-
-    from(t in query, where: exists(application))
+    from(t in query, join: user in User, on: user.id == t.assignee_id, where: user.did == ^did)
   end
 
   defp scope_participant(query, _did), do: query
@@ -540,53 +670,6 @@ defmodule Rice.Tasks do
 
   defp scope_mine(query, _user, _mine), do: query
 
-  defp expire_due_task(id) do
-    if Rice.Tsid.valid?(id) do
-      now = DateTime.utc_now()
-
-      from(t in Task,
-        where:
-          t.id == ^id and t.status == "open" and not is_nil(t.application_deadline) and
-            t.application_deadline <= ^now
-      )
-      |> expire_tasks(now)
-    end
-  end
-
-  defp expire_tasks(query, now) do
-    {:ok, expired} =
-      Repo.transaction(fn ->
-        tasks = query |> lock("FOR UPDATE SKIP LOCKED") |> Repo.all()
-
-        Enum.each(tasks, fn task ->
-          {updates, detail, reward_step} = refund_reward(task, "expired")
-
-          {:ok, :updated} =
-            conditional_update(
-              Repo,
-              from(t in Task, where: t.id == ^task.id and t.status == "open"),
-              Keyword.put(updates, :updated_at, now)
-            )
-
-          if reward_step do
-            {:ok, :refunded} = reward_step.(Repo, %{})
-          end
-
-          event_changeset(task.id, nil, "open", "expired", detail) |> Repo.insert!()
-
-          applicant_ids(Repo, task.id)
-          |> Enum.each(fn recipient_id ->
-            notification_changeset(task, recipient_id, task.creator_id, "task_expired", detail)
-            |> Repo.insert!()
-          end)
-        end)
-
-        length(tasks)
-      end)
-
-    expired
-  end
-
   defp conditional_update(repo, query, updates) do
     case repo.update_all(query, set: updates) do
       {1, _} -> {:ok, :updated}
@@ -594,15 +677,20 @@ defmodule Rice.Tasks do
     end
   end
 
-  defp update_task(query, task_id, updates) do
-    case conditional_update(
-           Repo,
-           query,
-           Keyword.put(updates, :updated_at, DateTime.utc_now())
-         ) do
-      {:ok, _} -> fetch_task_record(task_id)
-      error -> error
-    end
+  # Core terms and the reviewed submission must come from the same locked task state.
+  defp with_locked_task(task_id, action) do
+    Repo.transaction(fn ->
+      case Repo.one(from t in Task, where: t.id == ^task_id, lock: "FOR UPDATE") do
+        nil ->
+          Repo.rollback(:not_found)
+
+        task ->
+          case action.(task) do
+            {:ok, result} -> result
+            {:error, reason} -> Repo.rollback(reason)
+          end
+      end
+    end)
   end
 
   defp transition_task(query, task, updates, actor_id, detail, notifications) do
@@ -642,7 +730,9 @@ defmodule Rice.Tasks do
     {
       [status: "open", reward_status: "reserved"],
       reward_detail(task, :reserved),
-      fn repo, _changes -> Grains.reserve_task_reward(repo, task.creator_id, amount) end
+      fn repo, _changes ->
+        Grains.reserve_business(repo, task.creator_id, amount, "rice://tasks/#{task.id}")
+      end
     }
   end
 
@@ -653,7 +743,9 @@ defmodule Rice.Tasks do
     {
       [status: status, reward_status: "refunded"],
       reward_detail(task, :refunded),
-      fn repo, _changes -> Grains.refund_task_reward(repo, task.creator_id, amount) end
+      fn repo, _changes ->
+        Grains.refund_business(repo, task.creator_id, amount, "rice://tasks/#{task.id}")
+      end
     }
   end
 
@@ -668,7 +760,13 @@ defmodule Rice.Tasks do
       [status: "completed", reward_status: "settled"],
       reward_detail(task, :settled),
       fn repo, _changes ->
-        Grains.settle_task_reward(repo, task.creator_id, assignee_id, task.id, amount)
+        Grains.settle_business(
+          repo,
+          task.creator_id,
+          assignee_id,
+          amount,
+          "rice://tasks/#{task.id}"
+        )
       end
     }
   end
@@ -762,6 +860,8 @@ defmodule Rice.Tasks do
 
   defp preload_list(tasks) do
     Repo.preload(tasks,
+      image_links: :attachment,
+      node: [:logo, user: :avatar],
       creator: :avatar,
       assignee: :avatar,
       applications: [],
@@ -771,6 +871,8 @@ defmodule Rice.Tasks do
 
   defp preload_detail(task) do
     Repo.preload(task,
+      image_links: :attachment,
+      node: [:logo, user: :avatar],
       creator: :avatar,
       assignee: :avatar,
       applications: [user: :avatar],

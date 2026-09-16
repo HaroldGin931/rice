@@ -38,6 +38,16 @@ defmodule RiceWeb.Api.FallbackController do
     |> json(%{errors: %{detail: "资源状态已经变化，请刷新后重试"}})
   end
 
+  def call(conn, {:error, :capacity_full}) do
+    conn |> put_status(:conflict) |> json(%{errors: %{detail: "已通过人数达到上限"}})
+  end
+
+  def call(conn, {:error, :missing_request_id}) do
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{errors: %{client_request_id: ["缺少有效请求标识"]}})
+  end
+
   def call(conn, {:error, :insufficient_balance}) do
     conn
     |> put_status(:unprocessable_entity)
@@ -47,7 +57,7 @@ defmodule RiceWeb.Api.FallbackController do
   def call(conn, {:error, :grain_reservation_missing}) do
     conn
     |> put_status(:conflict)
-    |> json(%{errors: %{detail: "任务奖励冻结状态异常，请刷新后重试"}})
+    |> json(%{errors: %{detail: "资金记录暂时无法处理，本次操作未生效"}})
   end
 
   def call(conn, {:error, reason})

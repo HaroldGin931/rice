@@ -40,6 +40,12 @@ defmodule Rice.Grains do
       changeset = Transfer.changeset(%Transfer{}, attrs)
 
       Multi.new()
+      |> Multi.run(:accounts, fn repo, _ ->
+        ids = [from.id, to.id]
+
+        {:ok,
+         repo.all(from u in User, where: u.id in ^ids, order_by: [asc: u.id], lock: "FOR UPDATE")}
+      end)
       |> Multi.insert(:transfer, changeset)
       |> Multi.run(:debit, fn repo, _ -> debit(repo, from.id, amount) end)
       |> Multi.run(:credit, fn repo, _ -> credit(repo, to.id, amount) end)
@@ -73,56 +79,178 @@ defmodule Rice.Grains do
     end
   end
 
-  @doc "在调用方事务中把任务奖励从可用余额移到冻结余额。"
-  def reserve_task_reward(repo, user_id, amount) when is_integer(amount) and amount > 0 do
-    {count, _} =
-      repo.update_all(
-        from(u in User, where: u.id == ^user_id and u.grain_balance >= ^amount),
-        inc: [grain_balance: -amount, grain_frozen_balance: amount]
-      )
+  @doc "Reserve one business amount inside the caller's transaction."
+  def reserve_business(repo, user_id, amount, uri) when is_integer(amount) and amount > 0 do
+    # The payer row serializes duplicate reservations, including a request retry.
+    repo.one!(from u in User, where: u.id == ^user_id, lock: "FOR UPDATE")
 
-    if count == 1, do: {:ok, :reserved}, else: {:error, :insufficient_balance}
-  end
+    case repo.get_by(Rice.Grains.Receipt, subject_uri: uri, kind: "reserved") do
+      nil ->
+        with {:ok, _} <- reserve_balance(repo, user_id, amount) do
+          receipt(repo, "reserved", user_id, nil, amount, uri)
+        end
 
-  @doc "在调用方事务中把已冻结的任务奖励退回发布者可用余额。"
-  def refund_task_reward(repo, user_id, amount) when is_integer(amount) and amount > 0 do
-    {count, _} =
-      repo.update_all(
-        from(u in User, where: u.id == ^user_id and u.grain_frozen_balance >= ^amount),
-        inc: [grain_balance: amount, grain_frozen_balance: -amount]
-      )
+      %{from_user_id: ^user_id, amount: ^amount} = existing ->
+        {:ok, existing}
 
-    if count == 1, do: {:ok, :refunded}, else: {:error, :grain_reservation_missing}
-  end
-
-  @doc "在调用方事务中释放冻结奖励、给承作人入账并写入任务奖励流水。"
-  def settle_task_reward(repo, from_id, to_id, task_id, amount)
-      when is_integer(amount) and amount > 0 do
-    attrs = %{
-      kind: "task_reward",
-      from_user_id: from_id,
-      to_user_id: to_id,
-      amount: amount,
-      memo: "任务完成奖励",
-      subject_uri: "rice://tasks/#{task_id}"
-    }
-
-    with {1, _} <-
-           repo.update_all(
-             from(u in User, where: u.id == ^from_id and u.grain_frozen_balance >= ^amount),
-             inc: [grain_frozen_balance: -amount]
-           ),
-         {1, _} <-
-           repo.update_all(from(u in User, where: u.id == ^to_id),
-             inc: [grain_balance: amount]
-           ),
-         {:ok, transfer} <- repo.insert(Transfer.changeset(%Transfer{}, attrs)) do
-      {:ok, transfer}
-    else
-      {0, _} -> {:error, :grain_reservation_missing}
-      {:error, reason} -> {:error, reason}
+      _ ->
+        {:error, :conflict}
     end
   end
+
+  def refund_business(repo, user_id, amount, uri) do
+    finish_business(repo, user_id, nil, amount, uri, "refunded")
+  end
+
+  def settle_business(repo, user_id, to_id, amount, uri) do
+    finish_business(repo, user_id, to_id, amount, uri, "settled")
+  end
+
+  defp finish_business(repo, user_id, to_id, amount, uri, kind) do
+    ids = Enum.reject([user_id, to_id], &is_nil/1)
+    repo.all(from u in User, where: u.id in ^ids, order_by: [asc: u.id], lock: "FOR UPDATE")
+
+    reserved =
+      repo.one(
+        from r in Rice.Grains.Receipt,
+          where: r.subject_uri == ^uri and r.kind == "reserved",
+          lock: "FOR UPDATE"
+      )
+
+    case reserved do
+      %{from_user_id: ^user_id, amount: ^amount} ->
+        outcome =
+          repo.one(
+            from r in Rice.Grains.Receipt,
+              where: r.subject_uri == ^uri and r.kind != "reserved"
+          )
+
+        case outcome do
+          %{kind: ^kind, to_user_id: ^to_id} = existing -> {:ok, existing}
+          nil -> release_business(repo, user_id, to_id, amount, uri, kind)
+          _ -> {:error, :conflict}
+        end
+
+      _ ->
+        {:error, :grain_reservation_missing}
+    end
+  end
+
+  defp reserve_balance(repo, id, amount) do
+    case repo.update_all(from(u in User, where: u.id == ^id and u.grain_balance >= ^amount),
+           inc: [grain_balance: -amount, grain_frozen_balance: amount]
+         ) do
+      {1, _} -> {:ok, :reserved}
+      _ -> {:error, :insufficient_balance}
+    end
+  end
+
+  defp release_business(repo, from_id, to_id, amount, uri, kind) do
+    increments =
+      if kind == "refunded",
+        do: [grain_frozen_balance: -amount, grain_balance: amount],
+        else: [grain_frozen_balance: -amount]
+
+    case repo.update_all(
+           from(u in User, where: u.id == ^from_id and u.grain_frozen_balance >= ^amount),
+           inc: increments
+         ) do
+      {1, _} ->
+        if kind == "refunded" do
+          receipt(repo, kind, from_id, nil, amount, uri)
+        else
+          transfer_kind =
+            if String.starts_with?(uri, "rice://tasks/"), do: "task_reward", else: "event_fee"
+
+          with {:ok, _} <- credit(repo, to_id, amount),
+               {:ok, transfer} <-
+                 repo.insert(
+                   Transfer.changeset(%Transfer{}, %{
+                     kind: transfer_kind,
+                     from_user_id: from_id,
+                     to_user_id: to_id,
+                     amount: amount,
+                     subject_uri: uri,
+                     memo: if(transfer_kind == "task_reward", do: "任务完成奖励", else: "活动报名费用")
+                   })
+                 ) do
+            receipt(repo, kind, from_id, to_id, amount, uri, transfer.id)
+          end
+        end
+
+      _ ->
+        {:error, :grain_reservation_missing}
+    end
+  end
+
+  defp receipt(repo, kind, from_id, to_id, amount, uri, transfer_id \\ nil) do
+    repo.insert(
+      Rice.Grains.Receipt.changeset(%Rice.Grains.Receipt{}, %{
+        kind: kind,
+        from_user_id: from_id,
+        to_user_id: to_id,
+        amount: amount,
+        subject_uri: uri,
+        transfer_id: transfer_id
+      })
+    )
+  end
+
+  def wallet(%User{id: id}, params \\ %{}) do
+    user = Repo.get!(User, id)
+
+    earned =
+      Repo.one(from t in Transfer, where: t.to_user_id == ^id, select: coalesce(sum(t.amount), 0))
+
+    opts = Pagination.params(Map.take(params, ["before", "limit"]))
+
+    transfers =
+      from(t in Transfer,
+        where: t.from_user_id == ^id or t.to_user_id == ^id,
+        preload: [:from_user, :to_user]
+      )
+      |> Pagination.paginate(Repo, opts)
+
+    receipts =
+      from(r in Rice.Grains.Receipt,
+        where: r.from_user_id == ^id and r.kind != "settled",
+        preload: [:from_user, :to_user]
+      )
+      |> Pagination.paginate(Repo, opts)
+
+    combined = Enum.sort_by(transfers.entries ++ receipts.entries, & &1.id, :desc)
+    page = Enum.take(combined, opts.limit)
+
+    more? =
+      length(combined) > opts.limit or transfers.next_cursor != nil or receipts.next_cursor != nil
+
+    next_cursor = if more? and page != [], do: List.last(page).id
+
+    entries =
+      page
+      |> Enum.map(fn entry ->
+        %{
+          id: entry.id,
+          kind: entry.kind,
+          amount: entry.amount,
+          subject_uri: entry.subject_uri,
+          inserted_at: entry.inserted_at,
+          from_user: wallet_user(entry.from_user),
+          to_user: wallet_user(entry.to_user)
+        }
+      end)
+
+    %{
+      balance: user.grain_balance,
+      frozen: user.grain_frozen_balance,
+      earned: to_integer(earned),
+      entries: entries,
+      next_cursor: next_cursor
+    }
+  end
+
+  defp wallet_user(nil), do: nil
+  defp wallet_user(user), do: %{id: user.id, nickname: user.nickname, handle: user.handle}
 
   # 这一条 SQL 就是全部的并发控制。`grain_balance >= amount` 让扣款和余额检查
   # 在同一个原子操作里完成,不存在"查完到扣之间被插一脚"的窗口。
