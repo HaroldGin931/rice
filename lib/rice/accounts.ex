@@ -433,8 +433,7 @@ defmodule Rice.Accounts do
     case get_user_by_identifier(identifier) do
       nil ->
         # 用户不存在时也走一次 PDS,避免用响应时间区分"账号不存在"和"密码错"
-        pds().create_session(identifier, password)
-        {:error, :invalid_credentials}
+        pds().create_session(identifier, password) |> login_failure()
 
       user ->
         cond do
@@ -447,12 +446,19 @@ defmodule Rice.Accounts do
                 {:ok, token} = issue_token(user)
                 {:ok, %{user: put_semi_wallet(user), token: token, pds_session: session}}
 
-              {:error, _} ->
-                {:error, :invalid_credentials}
+              {:error, _} = error ->
+                login_failure(error)
             end
         end
     end
   end
+
+  # 错误凭据与上游不可用分开；不存在的本地账号也走同一错误分类。
+  defp login_failure({:error, {:pds, _, status, _}}) when status in [400, 401],
+    do: {:error, :invalid_credentials}
+
+  defp login_failure({:ok, _session}), do: {:error, :invalid_credentials}
+  defp login_failure(_), do: {:error, :login_unavailable}
 
   # ── 令牌 ────────────────────────────────────────────────────────────────
 

@@ -455,7 +455,26 @@ defmodule Rice.AccountsTest do
     # 账号不存在和密码错误必须不可区分,否则就是一个账号枚举接口。
     # 用户不存在时也走一次 PDS,让两条路径的耗时特征接近。
     test "账号不存在时同样是 invalid_credentials,并且也打了一次 PDS" do
-      expect(Rice.PDSMock, :create_session, fn "nobody", "pw" -> {:error, :whatever} end)
+      expect(Rice.PDSMock, :create_session, fn "nobody", "pw" ->
+        {:error, {:pds, "createSession", 401, "AuthenticationRequired"}}
+      end)
+
+      assert {:error, :invalid_credentials} = Accounts.login("nobody", "pw")
+    end
+
+    test "PDS 网络或服务故障不会误报凭据错误", %{user: user} do
+      for failure <- [
+            {:error, {:transport, :timeout}},
+            {:error, {:pds, "createSession", 503, "Unavailable"}}
+          ],
+          identifier <- [user.handle, "nobody"] do
+        expect(Rice.PDSMock, :create_session, fn ^identifier, "pw" -> failure end)
+        assert {:error, :login_unavailable} = Accounts.login(identifier, "pw")
+      end
+    end
+
+    test "PDS 有账号但本地已不存在也不能签发令牌" do
+      expect(Rice.PDSMock, :create_session, fn "nobody", "pw" -> {:ok, %{}} end)
       assert {:error, :invalid_credentials} = Accounts.login("nobody", "pw")
     end
 
@@ -466,7 +485,11 @@ defmodule Rice.AccountsTest do
 
     test "软删的账号视为不存在", %{user: user} do
       {:ok, _} = Accounts.delete_user(user)
-      expect(Rice.PDSMock, :create_session, fn _, _ -> {:error, :whatever} end)
+
+      expect(Rice.PDSMock, :create_session, fn _, _ ->
+        {:error, {:pds, "createSession", 401, "AuthenticationRequired"}}
+      end)
+
       assert {:error, :invalid_credentials} = Accounts.login("alice.web5.xjdao.test", "pw")
     end
   end
