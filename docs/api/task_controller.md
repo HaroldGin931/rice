@@ -69,7 +69,8 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 仍表示任务或草稿最初创建的时间。
 
 `allowed_actions` 是服务端根据当前用户和状态计算的，可包含 `publish`、`apply`、
-`appoint`、`cancel`、`submit_result`、`approve_result`、`request_changes`。未登录时为空数组。
+`appoint`、`reject_application`、`cancel`、`submit_result`、`approve_result`、`request_changes`。
+`appoint` 和 `reject_application` 仅在任务仍招募且有待处理申请时向发布者提供。未登录时为空数组。
 
 详情中，只有发布者能看到 `applications`；只有发布者和承作人能看到 `submissions`。
 `events` 只在详情响应出现，按时间正序包含 `from_status`、`to_status`、可选 `detail`、
@@ -141,6 +142,19 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 
 理由选填，最长 512。不能申请自己的任务；同一用户同一任务只有一份申请，开放期内重复请求
 返回原申请且不重复通知。无需先加入社区。申请截止后返回 `409`。
+已被拒绝的申请也不会重新进入候选队列；开放期内重复提交仍返回原申请的未入选结果。
+
+### `POST /api/tasks/:task_id/applications/:application_id/reject`
+
+请求无需额外字段。仅发布者可以拒绝 `open` 任务中尚未任命的申请，申请截止后仍可处理。
+成功返回 `200` 和更新后的完整任务对象；被拒申请的 `status` 和本人 `my_application_status`
+均为 `not_selected`，任务继续招募，其他候选不受影响。拒绝不改变任务奖励与冻结余额。
+发布者和申请人本人可见该申请的结果，公众看不到申请列表。
+
+申请只新增可空的 `rejected_at` 时间用于记住主动拒绝；旧记录的空值继续按原规则计算状态。
+同一招募中任务重复拒绝返回成功，但只发送一次 `application_not_selected` 通知。
+非发布者返回 `403`，不存在或不属于该任务的申请返回 `404`，已任命或任务已结束返回 `409`。
+拒绝和任命共用任务行锁，先被拒绝的申请不能再被任命。
 
 ### `POST /api/tasks/:task_id/applications/:application_id/appoint`
 
@@ -148,10 +162,10 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 {"appointment_reason":"相关经历与本任务最匹配。"}
 ```
 
-仅发布者可任命一名申请人。成功后任务进入 `in_progress`。申请状态不重复存库：详情
+仅发布者可任命一名未被拒绝的申请人。成功后任务进入 `in_progress`。申请状态不重复存库：详情
 响应会根据任务承作人把被选申请显示为 `appointed`，其他申请显示为 `not_selected`。
-任务同时记录 `appointed_at` 和最长 512 字的可选 `appointment_reason`。条件更新保证并发
-时只会任命一人。
+任务同时记录 `appointed_at` 和最长 512 字的可选 `appointment_reason`。任务行锁与条件更新
+保证并发时只会任命一人，也不会任命已拒绝的申请；主动拒绝过的申请不会再次收到未入选通知。
 
 ### `POST /api/tasks/:task_id/submissions`
 

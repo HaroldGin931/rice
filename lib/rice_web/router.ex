@@ -257,6 +257,11 @@ defmodule RiceWeb.Router do
     post "/tasks/:task_id/cancel", TaskController, :cancel
     post "/tasks/:task_id/applications", TaskController, :apply
     post "/tasks/:task_id/applications/:application_id/appoint", TaskController, :appoint
+
+    post "/tasks/:task_id/applications/:application_id/reject",
+         TaskController,
+         :reject_application
+
     post "/tasks/:task_id/submissions", TaskController, :submit
     post "/tasks/:task_id/submissions/:submission_id/approve", TaskController, :approve
 

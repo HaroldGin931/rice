@@ -274,15 +274,56 @@ defmodule Rice.Tasks do
   def apply(%User{}, %Task{}, _attrs), do: {:error, :conflict}
 
   def appoint(user, %Task{} = task, application_id, attrs \\ %{}) do
-    with {:ok, application} <- fetch_record(Application, task.id, application_id) do
-      appoint_application(user, task, application, attrs)
+    with_locked_task(task.id, fn current ->
+      with {:ok, application} <- fetch_record(Application, current.id, application_id) do
+        appoint_application(user, current, application, attrs)
+      end
+    end)
+  end
+
+  def reject_application(user, %Task{} = task, application_id) do
+    with_locked_task(task.id, fn current ->
+      with {:ok, application} <- fetch_record(Application, current.id, application_id) do
+        reject_current_application(user, current, application)
+      end
+    end)
+  end
+
+  defp reject_current_application(
+         %User{id: creator_id},
+         %Task{creator_id: creator_id, status: "open"} = task,
+         %Application{} = application
+       ) do
+    if application.rejected_at do
+      {:ok, preload_detail(task)}
+    else
+      with {:ok, _} <-
+             application
+             |> Ecto.Changeset.change(rejected_at: DateTime.utc_now())
+             |> Repo.update(),
+           {:ok, _} <-
+             Repo.insert(
+               notification_changeset(
+                 task,
+                 application.user_id,
+                 creator_id,
+                 "application_not_selected"
+               )
+             ) do
+        {:ok, preload_detail(task)}
+      end
     end
   end
+
+  defp reject_current_application(%User{id: id}, %Task{creator_id: id}, _application),
+    do: {:error, :conflict}
+
+  defp reject_current_application(%User{}, %Task{}, _application), do: {:error, :forbidden}
 
   defp appoint_application(
          %User{id: creator_id},
          %Task{creator_id: creator_id, status: "open"} = task,
-         %Application{task_id: task_id} = application,
+         %Application{task_id: task_id, rejected_at: nil} = application,
          attrs
        )
        when task_id == task.id do
@@ -293,7 +334,14 @@ defmodule Rice.Tasks do
 
       notifications =
         fn repo ->
-          Enum.map(applicant_ids(repo, task.id), fn user_id ->
+          pending_ids =
+            repo.all(
+              from a in Application,
+                where: a.task_id == ^task.id and is_nil(a.rejected_at),
+                select: a.user_id
+            )
+
+          Enum.map(pending_ids, fn user_id ->
             if user_id == application.user_id,
               do: {user_id, creator_id, "assignee_appointed", appointment_reason},
               else: {user_id, creator_id, "application_not_selected", nil}

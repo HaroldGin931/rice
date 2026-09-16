@@ -146,6 +146,10 @@ defmodule RiceWeb.Api.TaskJSON do
   defp allowed_actions(_task, _applications, nil), do: []
 
   defp allowed_actions(task, applications, %User{id: user_id}) do
+    can_review_applications? =
+      task.status == "open" and task.creator_id == user_id and
+        Enum.any?(applications, &is_nil(&1.rejected_at))
+
     []
     |> maybe_add(task.status == "draft" and task.creator_id == user_id, "publish")
     |> maybe_add(
@@ -154,11 +158,8 @@ defmodule RiceWeb.Api.TaskJSON do
         not Enum.any?(applications, &(&1.user_id == user_id)),
       "apply"
     )
-    |> maybe_add(
-      task.status == "open" and task.creator_id == user_id and
-        applications != [],
-      "appoint"
-    )
+    |> maybe_add(can_review_applications?, "appoint")
+    |> maybe_add(can_review_applications?, "reject_application")
     |> maybe_add(task.status in ["open", "draft"] and task.creator_id == user_id, "cancel")
     |> maybe_add(task.status == "in_progress" and task.assignee_id == user_id, "submit_result")
     |> maybe_add(task.status == "under_review" and task.creator_id == user_id, "approve_result")
@@ -179,6 +180,11 @@ defmodule RiceWeb.Api.TaskJSON do
   end
 
   defp application_status(%Application{user_id: id}, %{assignee_id: id}), do: "appointed"
+
+  defp application_status(%Application{rejected_at: rejected_at}, _task)
+       when not is_nil(rejected_at),
+       do: "not_selected"
+
   defp application_status(_application, %{status: "open"}), do: "pending"
   defp application_status(_application, %{status: "cancelled"}), do: "cancelled"
   defp application_status(_application, %{status: "expired"}), do: "expired"

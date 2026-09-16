@@ -1,9 +1,10 @@
 defmodule Rice.Tasks.Application do
-  @moduledoc "用户对任务的申请；发布者任命一人后，其余申请标记为未入选。"
+  @moduledoc "用户对任务的申请；可被发布者拒绝，任命一人后其余申请也显示为未入选。"
   use Rice.Schema
 
   schema "task_applications" do
     field(:reason, :string, default: "")
+    field(:rejected_at, :utc_datetime_usec)
 
     belongs_to(:task, Rice.Tasks.Task)
     belongs_to(:user, Rice.Accounts.User)

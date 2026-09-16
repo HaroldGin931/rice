@@ -81,6 +81,14 @@ defmodule RiceWeb.Api.TaskController do
     end
   end
 
+  def reject_application(conn, %{"task_id" => task_id, "application_id" => application_id}) do
+    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
+         {:ok, task} <-
+           Tasks.reject_application(conn.assigns.current_user, task, application_id) do
+      render(conn, :show, task: task, current_user: conn.assigns.current_user)
+    end
+  end
+
   def approve(conn, %{"task_id" => task_id, "submission_id" => submission_id}) do
     with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
          {:ok, task} <- Tasks.approve_result(conn.assigns.current_user, task, submission_id) do

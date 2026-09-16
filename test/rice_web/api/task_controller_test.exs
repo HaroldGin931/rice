@@ -55,6 +55,90 @@ defmodule RiceWeb.Api.TaskControllerTest do
              |> json_response(200)
   end
 
+  test "发布者拒绝候选后返回未入选，动作及可见范围同步更新" do
+    publisher = task_publisher_fixture()
+    {:ok, publisher_token} = Rice.Accounts.issue_token(publisher)
+    {worker, worker_token} = user_with_token()
+    {other, other_token} = user_with_token()
+    task = task_fixture(publisher)
+    {:ok, application} = Rice.Tasks.apply(worker, task, %{})
+
+    initial =
+      build_conn()
+      |> authed(publisher_token)
+      |> get(~p"/api/tasks/#{task.id}")
+      |> json_response(200)
+
+    assert "reject_application" in initial["data"]["allowed_actions"]
+
+    assert build_conn()
+           |> post(~p"/api/tasks/#{task.id}/applications/#{application.id}/reject", %{})
+           |> json_response(401)
+
+    assert build_conn()
+           |> authed(worker_token)
+           |> post(~p"/api/tasks/#{task.id}/applications/#{application.id}/reject", %{})
+           |> json_response(403)
+
+    rejected =
+      build_conn()
+      |> authed(publisher_token)
+      |> post(~p"/api/tasks/#{task.id}/applications/#{application.id}/reject", %{})
+      |> json_response(200)
+
+    assert rejected["data"]["status"] == "open"
+    assert hd(rejected["data"]["applications"])["status"] == "not_selected"
+    refute "appoint" in rejected["data"]["allowed_actions"]
+    refute "reject_application" in rejected["data"]["allowed_actions"]
+
+    own =
+      build_conn()
+      |> authed(worker_token)
+      |> get(~p"/api/tasks/#{task.id}")
+      |> json_response(200)
+
+    assert own["data"]["my_application_status"] == "not_selected"
+    assert own["data"]["my_application"]["status"] == "not_selected"
+    assert is_nil(own["data"]["applications"])
+    refute "apply" in own["data"]["allowed_actions"]
+    refute "reject_application" in own["data"]["allowed_actions"]
+
+    public = build_conn() |> get(~p"/api/tasks/#{task.id}") |> json_response(200)
+    assert is_nil(public["data"]["applications"])
+    assert is_nil(public["data"]["my_application"])
+    assert public["data"]["allowed_actions"] == []
+
+    assert build_conn()
+           |> authed(publisher_token)
+           |> post(~p"/api/tasks/#{task.id}/applications/#{application.id}/appoint", %{})
+           |> json_response(409)
+
+    other_task = task_fixture(publisher)
+    {:ok, other_application} = Rice.Tasks.apply(other, other_task, %{})
+
+    assert build_conn()
+           |> authed(publisher_token)
+           |> post(~p"/api/tasks/#{task.id}/applications/#{other_application.id}/reject", %{})
+           |> json_response(404)
+
+    applied =
+      build_conn()
+      |> authed(other_token)
+      |> post(~p"/api/tasks/#{task.id}/applications", %{})
+      |> json_response(201)
+
+    assert applied["data"]["my_application_status"] == "pending"
+
+    reopened =
+      build_conn()
+      |> authed(publisher_token)
+      |> get(~p"/api/tasks/#{task.id}")
+      |> json_response(200)
+
+    assert "appoint" in reopened["data"]["allowed_actions"]
+    assert "reject_application" in reopened["data"]["allowed_actions"]
+  end
+
   test "接口跑通申请、任命、提交、驳回与审核通过", %{conn: conn} do
     publisher = task_publisher_fixture()
     {:ok, _} = Rice.Grains.grant(publisher, 100)
