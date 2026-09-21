@@ -25,6 +25,11 @@ defmodule RiceWeb.Api.VerificationCodeController do
         |> put_status(:unprocessable_entity)
         |> json(%{errors: %{detail: "请求参数不合法"}})
 
+      {:error, :channel_not_configured} ->
+        conn
+        |> put_status(:service_unavailable)
+        |> json(%{errors: %{detail: "该验证码通道暂未开放，请选择其他方式或稍后再试。"}})
+
       {:error, _} ->
         conn |> put_status(:bad_gateway) |> json(%{errors: %{detail: "验证码发送失败"}})
     end

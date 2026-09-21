@@ -2,8 +2,10 @@
 
 「Login with Semi」—— OAuth 2.0 Authorization Code + PKCE。
 
-**这不是 REST API,是浏览器流程。** 前四个是给浏览器跳转用的 HTML 端点,
-只有最后一个 `/session/:ticket` 返回 JSON。
+**这是浏览器 OAuth 流程。** 新前端使用同源 `/auth/semi/login`、
+`/auth/semi/callback`、`/auth/semi/session/:ticket`，原短路径仍保留。
+`GET /auth/semi/options` 返回 `semi_enabled`、`verification_mode`、
+`registration_channels` 和 `handle_domain`，没有密钥。
 
 和 core 无关 —— core 没有这套东西,是 rice 自己的登录通道。C 端的账号密码登录
 在 [session_controller](session_controller.md)。
@@ -33,8 +35,8 @@
 生成 PKCE 材料,把 `state` 和 `code_verifier` 放进签名过的 session,
 跳转到 Semi 的授权页。
 
-Semi OAuth 没配置(缺 `SEMI_CLIENT_ID` / `SEMI_CLIENT_SECRET`)时带一条
-flash 消息跳回 `/`。
+Semi OAuth 缺凭据或 `RICE_LINK_ENC_KEY` 时入口关闭；直接调用会回前端
+`HANDOFF_URL` 显示未配置提示。可传站内 `returnTo`，拒绝站外跳转。
 
 ---
 
@@ -50,7 +52,8 @@ Semi 注册的 redirect_uri。
 校验 `state`(定长比较,防 CSRF)→ 换令牌 → 取 userinfo → 在 PDS 上建号或登录
 → 生成一次性 ticket → 跳到前端 `?ticket=…`。
 
-任何一步失败都是带 flash 消息跳回 `/`,不是 JSON 错误。
+任何一步失败都回前端 `HANDOFF_URL?error=…&returnTo=…`，由前端显示错误。
+成功只传一次性 ticket 与安全站内返回路径，不把访问令牌放在 URL。
 
 **Semi 的令牌不写进浏览器 cookie** —— access token 是长效的。session 里只留
 userinfo 的几个字段(`sub` `handle` `wallet_address` `phone_verified`
@@ -79,6 +82,7 @@ userinfo 的几个字段(`sub` `handle` `wallet_address` `phone_verified`
   "handle": "alice.web5.xjdao.xyz",
   "accessJwt": "…",
   "refreshJwt": "…",
+  "riceToken": "…",
   "daoJwt": "Bearer …"
 }
 ```
@@ -86,7 +90,9 @@ userinfo 的几个字段(`sub` `handle` `wallet_address` `phone_verified`
 注意这个响应**没有 `data` 包装** —— 它不走 API 的那套约定,是握手协议的一部分。
 字段名也是 AT Protocol 的 camelCase。
 
-`daoJwt` 只在 DAO 集成开着且成功时出现。
+`riceToken` 用于当前 Rice API；`accessJwt` / `refreshJwt` 仅用于 PDS。
+前端通过 Rice token 取本人资料，检查 DID 与 PDS 一致后才保存完整会话。
+`daoJwt` 只在旧 DAO 集成开着且成功时出现，当前前端不用它。
 
 ### 响应头
 

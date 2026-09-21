@@ -47,6 +47,8 @@ defmodule RiceWeb.Router do
     get "/login", SemiAuthController, :login
     get "/callback", SemiAuthController, :callback
     get "/logout", SemiAuthController, :logout
+    get "/auth/semi/login", SemiAuthController, :login
+    get "/auth/semi/callback", SemiAuthController, :callback
   end
 
   # One-time session-handoff redemption for the front-end (cross-origin JSON,
@@ -55,6 +57,8 @@ defmodule RiceWeb.Router do
     pipe_through :api
 
     get "/session/:ticket", SemiAuthController, :session
+    get "/auth/semi/session/:ticket", SemiAuthController, :session
+    get "/auth/semi/options", SemiAuthController, :options
   end
 
   # 从 xiangjiandao-core 迁过来的业务接口。REST + HTTP 状态码,不套

@@ -216,9 +216,15 @@ defmodule Rice.Accounts do
          :ok <- check_resend_interval(channel, target, purpose) do
       code = VerificationCode.generate_code()
 
-      with {:ok, record} <- Repo.insert(VerificationCode.build(channel, target, purpose, code)),
-           :ok <- deliver(channel, target, code) do
-        {:ok, record}
+      with {:ok, record} <- Repo.insert(VerificationCode.build(channel, target, purpose, code)) do
+        case deliver(channel, target, code) do
+          :ok ->
+            {:ok, record}
+
+          {:error, _} = error ->
+            Repo.delete(record)
+            error
+        end
       end
     end
   end

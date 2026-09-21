@@ -34,6 +34,20 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
              |> response(204)
     end
 
+    test "未配置通道明确失败,不留下可校验的验证码或限流记录", %{conn: conn} do
+      expect(Rice.NotificationsMock, :send_sms, 2, fn _, _, _ ->
+        {:error, :channel_not_configured}
+      end)
+
+      params = %{channel: "sms", phone: "13900000001", purpose: "register"}
+
+      for _ <- 1..2 do
+        assert conn |> post(~p"/api/verification_codes", params) |> json_response(503)
+      end
+
+      refute Rice.Repo.get_by(VerificationCode, target: "86-13900000001")
+    end
+
     test "发邮件验证码返回 204", %{conn: conn} do
       expect(Rice.NotificationsMock, :send_email, fn "a@example.com", _, _ -> :ok end)
 
