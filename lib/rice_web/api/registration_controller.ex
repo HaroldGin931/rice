@@ -38,15 +38,19 @@ defmodule RiceWeb.Api.RegistrationController do
     end
   end
 
-  @doc "第二步:凭票 + handle + 密码完成注册。"
+  @doc "第二步:凭票 + 公开昵称 + 密码完成注册,账号标识由服务端分配。"
   def create(conn, params) do
     with {:ok, contact} <- verify_ticket(params["ticket"]),
-         {:ok, handle} <- fetch_handle(params),
+         {:ok, nickname} <- fetch_nickname(params),
          {:ok, password} <- fetch_password(params) do
       attrs =
         contact
         |> atomize()
-        |> Map.merge(%{handle: handle, password: password})
+        |> Map.merge(%{
+          handle: registration_handle(params["ticket"]),
+          nickname: nickname,
+          password: password
+        })
 
       case Accounts.register(attrs) do
         {:ok, result} ->
@@ -63,9 +67,6 @@ defmodule RiceWeb.Api.RegistrationController do
         {:error, %Ecto.Changeset{} = changeset} ->
           {:error, changeset}
 
-        {:error, {:pds, _method, _status, message}} ->
-          conn |> put_status(:unprocessable_entity) |> json(%{errors: %{handle: [message]}})
-
         {:error, _} ->
           conn |> put_status(:bad_gateway) |> json(%{errors: %{detail: "创建账号失败"}})
       end
@@ -81,10 +82,18 @@ defmodule RiceWeb.Api.RegistrationController do
 
   defp verify_ticket(_), do: {:error, :invalid_ticket}
 
-  defp fetch_handle(%{"handle" => handle}) when is_binary(handle) and handle != "",
-    do: {:ok, handle}
+  # 同一张已验签的票重试时保持同一账号标识;不把手机号或邮箱放进公开 handle。
+  defp registration_handle(ticket) do
+    suffix = :crypto.hash(:sha256, ticket) |> binary_part(0, 12) |> Base.encode16(case: :lower)
+    "u#{suffix}.#{Rice.PDS.Api.impl().handle_domain()}"
+  end
 
-  defp fetch_handle(_), do: {:error, :missing_handle}
+  defp fetch_nickname(%{"nickname" => nickname}) when is_binary(nickname) do
+    nickname = String.trim(nickname)
+    if String.length(nickname) in 1..64, do: {:ok, nickname}, else: {:error, :invalid_nickname}
+  end
+
+  defp fetch_nickname(_), do: {:error, :invalid_nickname}
 
   # 密码不落 rice 的库,但长度还是要挡一道 —— PDS 那边的下限是 8
   defp fetch_password(%{"password" => password})

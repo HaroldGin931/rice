@@ -4,6 +4,11 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
   import Mox
   setup :verify_on_exit!
 
+  setup do
+    stub(Rice.PDSMock, :handle_domain, fn -> "web5.xjdao.test" end)
+    :ok
+  end
+
   alias Rice.Accounts.VerificationCode
 
   defp seed_code(channel, target) do
@@ -150,14 +155,22 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
 
       expect(Rice.PDSMock, :email_domain, fn -> "web5.xjdao.test" end)
 
-      expect(Rice.PDSMock, :create_account, fn %{handle: "alice.web5.xjdao.test"} ->
+      expect(Rice.PDSMock, :create_account, fn %{handle: handle} ->
+        assert handle =~ ~r/^u[a-f0-9]{24}\.web5\.xjdao\.test$/
+        refute handle =~ "13800000000"
+        refute handle =~ "alice"
+
         {:ok,
          %{
            "did" => "did:plc:alice",
-           "handle" => "alice.web5.xjdao.test",
+           "handle" => handle,
            "accessJwt" => "acc",
            "refreshJwt" => "ref"
          }}
+      end)
+
+      expect(Rice.PDSMock, :put_profile, fn "acc", "did:plc:alice", %{"displayName" => "小禾"} ->
+        {:ok, %{}}
       end)
 
       assert %{"data" => data} =
@@ -165,11 +178,13 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
                |> post(~p"/api/registrations", %{
                  ticket: ticket,
                  handle: "alice.web5.xjdao.test",
+                 nickname: " 小禾 ",
                  password: "hunter2hunter2"
                })
                |> json_response(201)
 
       assert data["user"]["did"] == "did:plc:alice"
+      assert data["user"]["nickname"] == "小禾"
       # 手机号来自票据,不是客户端传的
       assert data["user"]["phone"] == "13800000000"
       assert is_binary(data["token"])
@@ -186,10 +201,15 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
         {:ok, %{"did" => "did:plc:a", "handle" => "a.test", "accessJwt" => "acc"}}
       end)
 
+      expect(Rice.PDSMock, :put_profile, fn "acc", "did:plc:a", %{"displayName" => "小禾"} ->
+        {:ok, %{}}
+      end)
+
       assert %{"data" => data} =
                build_conn()
                |> post(~p"/api/registrations", %{
                  ticket: ticket,
+                 nickname: "小禾",
                  handle: "a.test",
                  password: "hunter2hunter2",
                  phone: "13900000000",
@@ -220,7 +240,7 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
                build_conn()
                |> post(~p"/api/registrations", %{
                  ticket: ticket,
-                 handle: "a.test",
+                 nickname: "小禾",
                  password: "short"
                })
                |> json_response(422)
@@ -228,31 +248,45 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
       assert detail =~ "8"
     end
 
-    test "缺 handle 被拒", %{conn: conn} do
+    test "昵称缺失、空白、超长或类型错误时拒绝,不创建 PDS 账号", %{conn: conn} do
       ticket = ticket_for(conn, "13800000000")
 
-      assert build_conn()
-             |> post(~p"/api/registrations", %{ticket: ticket, password: "hunter2hunter2"})
-             |> json_response(422)
+      for nickname <- [nil, "  ", String.duplicate("禾", 65), %{}] do
+        assert %{"errors" => %{"detail" => "昵称须为 1–64 个字"}} =
+                 build_conn()
+                 |> post(~p"/api/registrations", %{
+                   ticket: ticket,
+                   nickname: nickname,
+                   password: "hunter2hunter2"
+                 })
+                 |> json_response(422)
+      end
     end
 
-    test "PDS 说 handle 被占用时返回 422 而不是 500", %{conn: conn} do
+    test "上游失败后同票重试保持同一 handle,不透出上游内部错误", %{conn: conn} do
       ticket = ticket_for(conn, "13800000000")
+      caller = self()
+      expect(Rice.PDSMock, :email_domain, 2, fn -> "web5.xjdao.test" end)
 
-      expect(Rice.PDSMock, :email_domain, fn -> "web5.xjdao.test" end)
-
-      expect(Rice.PDSMock, :create_account, fn _ ->
+      expect(Rice.PDSMock, :create_account, 2, fn %{handle: handle} ->
+        send(caller, {:handle, handle})
         {:error, {:pds, "createAccount", 400, "HandleNotAvailable"}}
       end)
 
-      assert %{"errors" => %{"handle" => ["HandleNotAvailable"]}} =
-               build_conn()
-               |> post(~p"/api/registrations", %{
-                 ticket: ticket,
-                 handle: "taken.test",
-                 password: "hunter2hunter2"
-               })
-               |> json_response(422)
+      for handle <- ["first.test", "second.test"] do
+        assert %{"errors" => %{"detail" => "创建账号失败"}} =
+                 build_conn()
+                 |> post(~p"/api/registrations", %{
+                   ticket: ticket,
+                   handle: handle,
+                   nickname: "小禾",
+                   password: "hunter2hunter2"
+                 })
+                 |> json_response(502)
+      end
+
+      assert_received {:handle, generated}
+      assert_received {:handle, ^generated}
     end
 
     test "手机号已被占用时返回 422,且不去建 PDS 账号", %{conn: conn} do
@@ -262,7 +296,7 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
       assert build_conn()
              |> post(~p"/api/registrations", %{
                ticket: ticket,
-               handle: "a.test",
+               nickname: "小禾",
                password: "hunter2hunter2"
              })
              |> json_response(422)

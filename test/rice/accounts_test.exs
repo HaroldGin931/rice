@@ -371,9 +371,14 @@ defmodule Rice.AccountsTest do
          }}
       end)
 
+      expect(Rice.PDSMock, :put_profile, fn "acc", "did:plc:alice", %{"displayName" => "小禾"} ->
+        {:ok, %{}}
+      end)
+
       assert {:ok, %{user: user, token: token, pds_session: session}} =
                Accounts.register(%{
                  handle: "alice.web5.xjdao.test",
+                 nickname: "小禾",
                  password: "hunter2hunter2",
                  phone: "13800000000",
                  phone_region: "86"
@@ -381,7 +386,7 @@ defmodule Rice.AccountsTest do
 
       assert user.did == "did:plc:alice"
       assert user.phone == "13800000000"
-      assert user.nickname == "alice"
+      assert user.nickname == "小禾"
       assert session["accessJwt"] == "acc"
       assert Accounts.user_by_token(token).id == user.id
     end

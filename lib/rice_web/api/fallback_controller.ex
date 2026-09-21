@@ -63,7 +63,7 @@ defmodule RiceWeb.Api.FallbackController do
   def call(conn, {:error, reason})
       when reason in [
              :invalid_ticket,
-             :missing_handle,
+             :invalid_nickname,
              :weak_password,
              :invalid_amount,
              :invalid_listed,
@@ -84,7 +84,7 @@ defmodule RiceWeb.Api.FallbackController do
   end
 
   defp detail(:invalid_ticket), do: "注册票据无效或已过期,请重新验证"
-  defp detail(:missing_handle), do: "缺少 handle"
+  defp detail(:invalid_nickname), do: "昵称须为 1–64 个字"
   defp detail(:weak_password), do: "密码至少 8 位"
   defp detail(:invalid_amount), do: "金额必须是正整数"
   defp detail(:invalid_listed), do: "listed 必须是 true 或 false"

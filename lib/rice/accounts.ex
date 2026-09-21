@@ -5,6 +5,7 @@ defmodule Rice.Accounts do
   密码不在这里 —— PDS 是密码权威,登录就是 `com.atproto.server.createSession`。
   """
   import Ecto.Query
+  require Logger
 
   alias Ecto.Multi
   alias Rice.Accounts.{ApiToken, SemiLink, User, VerificationCode}
@@ -390,6 +391,15 @@ defmodule Rice.Accounts do
 
       case Repo.insert(User.registration_changeset(%User{}, user_attrs)) do
         {:ok, user} ->
+          # PDS 公开资料使用同一昵称;资料写入失败不让已创建的账号卡在注册页。
+          case pds().put_profile(session["accessJwt"], user.did, %{"displayName" => user.nickname}) do
+            {:ok, _} ->
+              :ok
+
+            {:error, _} ->
+              Logger.warning("registration: initial profile write failed for #{user.did}")
+          end
+
           {:ok, token} = issue_token(user)
           {:ok, %{user: user, token: token, pds_session: session}}
 
