@@ -13,10 +13,19 @@ defmodule RiceWeb.Api.VerificationCodeController do
 
     case Accounts.send_verification_code(channel, target, purpose) do
       {:ok, _record} ->
-        send_resp(conn, :no_content, "")
+        conn
+        |> put_resp_header(
+          "retry-after",
+          to_string(Accounts.verification_retry_after(channel, target))
+        )
+        |> send_resp(:no_content, "")
 
       {:error, :too_many_requests} ->
         conn
+        |> put_resp_header(
+          "retry-after",
+          to_string(Accounts.verification_retry_after(channel, target))
+        )
         |> put_status(:too_many_requests)
         |> json(%{errors: %{detail: "发送太频繁,请稍后再试"}})
 

@@ -70,8 +70,22 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
       expect(Rice.NotificationsMock, :send_sms, fn _, _, _ -> :ok end)
       params = %{channel: "sms", phone: "13800000000", purpose: "register"}
 
-      assert conn |> post(~p"/api/verification_codes", params) |> response(204)
-      assert build_conn() |> post(~p"/api/verification_codes", params) |> json_response(429)
+      conn = post(conn, ~p"/api/verification_codes", params)
+      assert response(conn, 204) == ""
+      assert get_resp_header(conn, "retry-after") == ["60"]
+
+      record = Rice.Repo.get_by!(VerificationCode, target: "86-13800000000")
+
+      record
+      |> Ecto.Changeset.change(inserted_at: DateTime.add(DateTime.utc_now(), -15, :second))
+      |> Rice.Repo.update!()
+
+      conn =
+        post(build_conn(), ~p"/api/verification_codes", %{params | purpose: "reset_password"})
+
+      assert json_response(conn, 429)
+      assert [seconds] = get_resp_header(conn, "retry-after")
+      assert String.to_integer(seconds) in 44..45
     end
 
     test "非法通道或用途返回 422", %{conn: conn} do

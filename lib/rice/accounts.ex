@@ -214,18 +214,29 @@ defmodule Rice.Accounts do
   """
   def send_verification_code(channel, target, purpose) do
     with :ok <- validate_code_request(channel, target, purpose),
-         :ok <- check_resend_interval(channel, target, purpose) do
-      code = VerificationCode.generate_code()
+         code = VerificationCode.generate_code(),
+         {:ok, record} <-
+           Repo.transaction(fn ->
+             # 同一联系方式的检查与占位必须原子完成,切换用途也不能绕过。
+             Repo.query!("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+               "verification:#{channel}:#{String.downcase(target)}"
+             ])
 
-      with {:ok, record} <- Repo.insert(VerificationCode.build(channel, target, purpose, code)) do
-        case deliver(channel, target, code) do
-          :ok ->
-            {:ok, record}
+             if verification_retry_after(channel, target) > 0,
+               do: Repo.rollback(:too_many_requests)
 
-          {:error, _} = error ->
-            Repo.delete(record)
-            error
-        end
+             case Repo.insert(VerificationCode.build(channel, target, purpose, code)) do
+               {:ok, record} -> record
+               {:error, reason} -> Repo.rollback(reason)
+             end
+           end) do
+      case deliver(channel, target, code) do
+        :ok ->
+          {:ok, record}
+
+        {:error, _} = error ->
+          Repo.delete(record)
+          error
       end
     end
   end
@@ -249,19 +260,25 @@ defmodule Rice.Accounts do
 
   defp valid_target?(_, _), do: false
 
-  defp check_resend_interval(channel, target, purpose) do
-    cutoff =
-      DateTime.add(DateTime.utc_now(), -VerificationCode.resend_interval_seconds(), :second)
-
-    recent =
-      Repo.exists?(
+  @doc "同一联系方式距离下次允许发码的秒数,包括已消费的验证码。"
+  def verification_retry_after(channel, target) do
+    sent_at =
+      Repo.one(
         from c in VerificationCode,
           where:
-            c.channel == ^channel and c.target == ^target and c.purpose == ^purpose and
-              c.inserted_at > ^cutoff
+            c.channel == ^channel and fragment("lower(?)", c.target) == ^String.downcase(target),
+          select: max(c.inserted_at)
       )
 
-    if recent, do: {:error, :too_many_requests}, else: :ok
+    if sent_at do
+      remaining =
+        DateTime.add(sent_at, VerificationCode.resend_interval_seconds(), :second)
+        |> DateTime.diff(DateTime.utc_now(), :millisecond)
+
+      max(0, ceil(remaining / 1_000))
+    else
+      0
+    end
   end
 
   defp deliver("sms", target, code) do
