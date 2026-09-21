@@ -106,6 +106,63 @@ defmodule RiceWeb.Api.EventControllerTest do
     assert Repo.get!(Rice.Accounts.User, second.id).grain_balance == 50
   end
 
+  test "本人撤销API返回完整活动，隐藏撤销入口并保留私人退款结果" do
+    {host, _host_token} = user_with_token()
+    {applicant, applicant_token} = user_with_token()
+    {_other, other_token} = user_with_token()
+    node = node_fixture(%{user_id: host.id})
+    {:ok, _} = Rice.Grains.grant(applicant, 50)
+    now = DateTime.utc_now()
+
+    {:ok, event} =
+      Events.create_event(host, %{
+        node_id: node.id,
+        title: "撤销申请API验收",
+        client_request_id: "withdraw-api-#{System.unique_integer([:positive])}",
+        description: "保留申请历史",
+        location: "社区",
+        fee_amount: 20,
+        capacity: 1,
+        application_deadline: DateTime.add(now, 1800),
+        starts_at: DateTime.add(now, 3600),
+        ends_at: DateTime.add(now, 7200)
+      })
+
+    applied =
+      build_conn()
+      |> authed(applicant_token)
+      |> post(~p"/api/events/#{event.id}/applications", %{reason: "私人申请理由"})
+      |> json_response(200)
+
+    own = applied["data"]["my_application"]
+    assert own["allowed_actions"] == ["withdraw"]
+    path = ~p"/api/events/#{event.id}/applications/#{own["id"]}/withdraw"
+    assert build_conn() |> post(path, %{}) |> json_response(401)
+    assert build_conn() |> authed(other_token) |> post(path, %{}) |> json_response(403)
+
+    withdrawn = build_conn() |> authed(applicant_token) |> post(path, %{}) |> json_response(200)
+    assert withdrawn["data"]["id"] == event.id
+    assert withdrawn["data"]["status"] == "open"
+    assert withdrawn["data"]["approved_count"] == 0
+    assert withdrawn["data"]["my_application"]["status"] == "withdrawn"
+    assert withdrawn["data"]["my_application"]["payment_status"] == "refunded"
+    assert withdrawn["data"]["my_application"]["allowed_actions"] == []
+    refute "apply" in withdrawn["data"]["allowed_actions"]
+
+    revisited =
+      build_conn()
+      |> authed(applicant_token)
+      |> get(~p"/api/events?mine=applied")
+      |> json_response(200)
+
+    assert hd(revisited["data"])["my_application"]["status"] == "withdrawn"
+    public = build_conn() |> get(~p"/api/events/#{event.id}") |> json_response(200)
+    assert public["data"]["my_application"] == nil
+    assert public["data"]["applications"] == []
+    refute Enum.any?(public["data"]["history"], &(&1["action"] == "application_withdrawn"))
+    refute inspect(public) =~ "私人申请理由"
+  end
+
   test "非法输入返回错误，草稿仅本人可见" do
     {host, token} = user_with_token()
     node = node_fixture(%{user_id: host.id})
@@ -118,15 +175,25 @@ defmodule RiceWeb.Api.EventControllerTest do
       location: "地点",
       status: "draft",
       capacity: 1,
-      application_deadline: DateTime.add(now, 60),
+      application_deadline: DateTime.add(now, 120),
       starts_at: DateTime.add(now, 120),
       ends_at: DateTime.add(now, 180)
     }
 
-    assert build_conn()
-           |> authed(token)
-           |> post(~p"/api/events", Map.put(attrs, :title, nil))
-           |> json_response(422)
+    for {field, value} <- [
+          title: nil,
+          application_deadline: DateTime.add(now, -1),
+          application_deadline: DateTime.add(now, 121),
+          ends_at: attrs.starts_at
+        ] do
+      rejected =
+        build_conn()
+        |> authed(token)
+        |> post(~p"/api/events", Map.put(attrs, field, value))
+        |> json_response(422)
+
+      assert Map.has_key?(rejected["errors"], Atom.to_string(field))
+    end
 
     created = build_conn() |> authed(token) |> post(~p"/api/events", attrs) |> json_response(201)
     id = created["data"]["id"]

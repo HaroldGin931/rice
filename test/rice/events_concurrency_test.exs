@@ -18,21 +18,7 @@ defmodule Rice.EventsConcurrencyTest do
       try do
         node = node_fixture(%{user_id: host.id})
         for user <- [first, second], do: Rice.Grains.grant(user, 100)
-        now = DateTime.utc_now()
-
-        {:ok, event} =
-          Events.create_event(host, %{
-            node_id: node.id,
-            title: "并发活动",
-            description: "独立测试记录",
-            location: "测试地点",
-            fee_amount: 20,
-            capacity: 1,
-            client_request_id: "race-#{System.unique_integer([:positive])}",
-            application_deadline: DateTime.add(now, 1800),
-            starts_at: DateTime.add(now, 3600),
-            ends_at: DateTime.add(now, 7200)
-          })
+        event = event!(host, node)
 
         duplicates =
           race(supervisor, [
@@ -106,23 +92,7 @@ defmodule Rice.EventsConcurrencyTest do
         # Cancellation and settlement compete for the same frozen fee; exactly one wins.
         before_balance = balance(first).grain_balance
 
-        attrs =
-          event
-          |> Map.from_struct()
-          |> Map.take([
-            :node_id,
-            :title,
-            :description,
-            :location,
-            :fee_amount,
-            :capacity,
-            :application_deadline,
-            :starts_at,
-            :ends_at
-          ])
-          |> Map.put(:client_request_id, "cancel-race-#{System.unique_integer([:positive])}")
-
-        {:ok, competing} = Events.create_event(host, attrs)
+        competing = event!(host, node)
         {:ok, competing} = Events.apply(first, competing, %{})
         application = hd(competing.applications)
         {:ok, competing} = Events.approve_application(host, competing, application.id)
@@ -166,6 +136,97 @@ defmodule Rice.EventsConcurrencyTest do
         cleanup(ids)
       end
     end)
+  end
+
+  test "并发撤销只退款一次，撤销与审批互斥", _ctx do
+    supervisor = start_supervised!(Task.Supervisor)
+
+    Sandbox.unboxed_run(Repo, fn ->
+      host = user_fixture()
+      applicant = user_fixture()
+      ids = [host.id, applicant.id]
+
+      try do
+        node = node_fixture(%{user_id: host.id})
+        {:ok, _} = Rice.Grains.grant(applicant, 100)
+        event = event!(host, node)
+        {:ok, event} = Events.apply(applicant, event, %{})
+        own = hd(event.applications)
+
+        repeated =
+          race(supervisor, [
+            fn -> Events.withdraw_application(applicant, event, own.id) end,
+            fn -> Events.withdraw_application(applicant, event, own.id) end
+          ])
+
+        assert Enum.all?(repeated, &match?({:ok, _}, &1))
+        assert balance(applicant).grain_balance == 100
+        assert balance(applicant).grain_frozen_balance == 0
+        assert Repo.get!(Application, own.id).status == "withdrawn"
+        uri = "rice://event_applications/#{own.id}"
+
+        assert Repo.aggregate(
+                 from(r in Rice.Grains.Receipt,
+                   where: r.subject_uri == ^uri and r.kind == "refunded"
+                 ),
+                 :count
+               ) == 1
+
+        assert Repo.aggregate(
+                 from(h in EventHistory,
+                   where: h.application_id == ^own.id and h.action == "application_withdrawn"
+                 ),
+                 :count
+               ) == 1
+
+        event = event!(host, node)
+        {:ok, event} = Events.apply(applicant, event, %{})
+        own = hd(event.applications)
+
+        competing =
+          race(supervisor, [
+            fn -> Events.withdraw_application(applicant, event, own.id) end,
+            fn -> Events.approve_application(host, event, own.id) end
+          ])
+
+        assert Enum.count(competing, &match?({:ok, _}, &1)) == 1
+        assert Enum.count(competing, &(&1 == {:error, :conflict})) == 1
+        final = Repo.get!(Application, own.id)
+
+        if final.status == "withdrawn" do
+          assert final.payment_status == "refunded"
+          assert balance(applicant).grain_balance == 100
+          assert balance(applicant).grain_frozen_balance == 0
+        else
+          assert final.status == "approved"
+          assert final.payment_status == "reserved"
+          assert balance(applicant).grain_balance == 80
+          assert balance(applicant).grain_frozen_balance == 20
+        end
+      after
+        cleanup(ids)
+      end
+    end)
+  end
+
+  defp event!(host, node) do
+    now = DateTime.utc_now()
+
+    {:ok, event} =
+      Events.create_event(host, %{
+        node_id: node.id,
+        title: "并发活动",
+        description: "独立数据库连接",
+        location: "测试地点",
+        fee_amount: 20,
+        capacity: 1,
+        client_request_id: "race-#{System.unique_integer([:positive])}",
+        application_deadline: DateTime.add(now, 1800),
+        starts_at: DateTime.add(now, 3600),
+        ends_at: DateTime.add(now, 7200)
+      })
+
+    event
   end
 
   defp race(supervisor, actions) do

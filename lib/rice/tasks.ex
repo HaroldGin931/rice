@@ -307,7 +307,7 @@ defmodule Rice.Tasks do
                  task,
                  application.user_id,
                  creator_id,
-                 "application_not_selected"
+                 "application_rejected"
                )
              ) do
         {:ok, preload_detail(task)}

@@ -17,6 +17,7 @@
 | `POST /api/events/:event_id/applications/:application_id/approve` | 通过候选，活动开始前可用，达到人数上限返回 `409` |
 | 同路径尾部 `reject` | 拒绝待审批申请并退回冻结费用 |
 | 同路径尾部 `remove` | 移除已通过报名并退款、释放名额；完成前可用 |
+| 同路径尾部 `withdraw` | 申请人撤销本人的待审批申请；活动开始前可用，全额退回冻结费用 |
 | `POST /api/events/:event_id/cancel` | 取消活动，退回全部尚未结算费用 |
 | `POST /api/events/:event_id/finish` | 实际结束时间后由主办方确认，结算仍有效的已通过报名 |
 
@@ -34,7 +35,7 @@
 列表与详情均返回有序 `attachments`，每项含 `id/kind/filename/content_type/byte_size/url`。
 完整校验及访问规则见 [正文图片](attachment_controller.md#任务与活动正文图片)。
 
-申请状态为 `pending/approved/rejected/removed/not_selected/cancelled`；支付状态为
+申请状态为 `pending/approved/rejected/removed/withdrawn/not_selected/cancelled`；支付状态为
 `none/reserved/refunded/settled`。结束后有效申请仍为 `approved`，付费项变为 `settled`。
 主办方看全部申请，本人看自己的申请，公众看不到候选名单和理由。详情历史遵守相同范围；
 公众只见活动级别进展。`allowed_actions` 由后端计算，申请项另有自己的审批动作列表。
@@ -42,8 +43,30 @@
 每分钟的 `Rice.Workers.StartEvents` 找到已到 `starts_at` 的活动，在同一事务内将剩余
 pending 申请设为未入选并原路退款，然后推进活动状态。失败由 Oban 重试，不依赖打开页面。
 结束时间本身不结算；主办方确认结束时先完成待处理候选退款，再处理有效报名。
+`status` 是持久化状态，定时处理之前可能短暂仍为 `open`；报名资格直接按当前时间检查，
+不等待定时任务。界面应结合 `application_deadline/starts_at/ends_at` 显示截止、进行中或待结束确认，
+不能仅凭 `open` 显示报名中，也不能仅凭 `ends_at` 已到显示已完成结算。
 
 所有写动作锁活动行；批量资金操作按用户 ID 顺序锁账户。业务状态和资金凭证同事务提交。
 同一申请的冻结只能退款或结算一次；重复申请、开始、结束、取消返回原结果，不重复处理。
-余额不足为 `422`，非主办方审批为 `403`，已结束后取消等冲突为 `409`。不提供自助撤回、
-拒绝后重报、部分退款或缺席退款接口。
+余额不足为 `422`，非主办方审批为 `403`，已结束后取消等冲突为 `409`。
+不提供已通过后的自助退出、撤销或拒绝后重报、部分退款或缺席退款接口。
+
+## 撤销待审批申请
+
+`POST /api/events/:event_id/applications/:application_id/withdraw` 无需额外字段，返回 `200`
+和完整活动对象。仅申请人本人可操作；申请须为 `pending`，活动须为 `open`，当前时间须严格
+早于 `starts_at`。报名截止后、活动开始前仍可撤销；达到开始时间后即使定时任务尚未执行也不可撤销。
+只有满足这些条件时，本人 `my_application.allowed_actions` 才包含 `withdraw`。
+
+成功后申请为 `withdrawn`（已撤销），收费项为 `refunded` 并全额退回原冻结费用，免费项保持
+`none`。保留申请和 `application_withdrawn` 历史，不删除或重新开放申请；每人每场仍只有一份申请。
+撤销与审批、系统开始共用活动行锁，退款、状态及通知同一事务提交。本人重复撤销已撤销申请返回
+原结果，不重复退款或通知，包括原撤销成功后活动已经开始的重试。
+
+未登录返回 `401`，操作他人申请返回 `403`，申请不存在或不属于该活动返回 `404`；已通过、
+被拒绝、已移除、已取消、未入选或不满足活动时间条件返回 `409`。主办方继续使用 `reject/remove`，
+不能代替申请人调用 `withdraw`。已撤销的申请不会参与活动开始、结束或整场取消的后续资金处理。
+
+部署须先执行 `20260920233500_allow_event_application_withdrawal` 迁移，再开放撤销接口。
+已有 `withdrawn` 记录后，直接回滚旧约束会安全失败；迁移事务保留现有约束，不把撤销历史改写为其他状态。

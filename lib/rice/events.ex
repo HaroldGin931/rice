@@ -230,18 +230,22 @@ defmodule Rice.Events do
   end
 
   def approve_application(user, event, application_id),
-    do: review_application(user, event, application_id, "approved")
+    do: change_application(user, event, application_id, "approved")
 
   def reject_application(user, event, application_id),
-    do: review_application(user, event, application_id, "rejected")
+    do: change_application(user, event, application_id, "rejected")
 
   def remove_application(user, event, application_id),
-    do: review_application(user, event, application_id, "removed")
+    do: change_application(user, event, application_id, "removed")
 
-  defp review_application(user, event, application_id, target) do
+  def withdraw_application(user, event, application_id),
+    do: change_application(user, event, application_id, "withdrawn")
+
+  defp change_application(user, event, application_id, target) do
     with_event(event.id, fn current ->
-      require_host!(user, current)
+      if target != "withdrawn", do: require_host!(user, current)
       application = application!(current, application_id)
+      if target == "withdrawn", do: require!(application.user_id == user.id, :forbidden)
 
       if application.status == target do
         current
@@ -396,22 +400,28 @@ defmodule Rice.Events do
   def application_actions(_event, _application, nil), do: []
 
   def application_actions(event, application, user) do
-    if event.creator_id == user.id and event.node.user_id == user.id do
-      cond do
-        application.status == "pending" and event.status == "open" and
-            before?(DateTime.utc_now(), event.starts_at) ->
-          if Enum.count(event.applications, &(&1.status == "approved")) < event.capacity,
-            do: ["approve", "reject"],
-            else: ["reject"]
+    cond do
+      application.user_id == user.id and application.status == "pending" and
+        event.status == "open" and before?(DateTime.utc_now(), event.starts_at) ->
+        ["withdraw"]
 
-        application.status == "approved" and event.status in ["open", "in_progress"] ->
-          ["remove"]
+      event.creator_id == user.id and event.node.user_id == user.id ->
+        cond do
+          application.status == "pending" and event.status == "open" and
+              before?(DateTime.utc_now(), event.starts_at) ->
+            if Enum.count(event.applications, &(&1.status == "approved")) < event.capacity,
+              do: ["approve", "reject"],
+              else: ["reject"]
 
-        true ->
-          []
-      end
-    else
-      []
+          application.status == "approved" and event.status in ["open", "in_progress"] ->
+            ["remove"]
+
+          true ->
+            []
+        end
+
+      true ->
+        []
     end
   end
 
@@ -464,6 +474,7 @@ defmodule Rice.Events do
       %{
         "rejected" => "活动申请未通过",
         "removed" => "活动报名已移除",
+        "withdrawn" => "活动申请已撤销",
         "not_selected" => "活动已开始，本次未入选",
         "cancelled" => "活动已取消"
       }[status]

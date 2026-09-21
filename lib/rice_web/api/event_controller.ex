@@ -42,6 +42,9 @@ defmodule RiceWeb.Api.EventController do
   def remove(conn, %{"event_id" => id, "application_id" => application_id}),
     do: change(conn, id, &Events.remove_application(&1, &2, application_id))
 
+  def withdraw(conn, %{"event_id" => id, "application_id" => application_id}),
+    do: change(conn, id, &Events.withdraw_application(&1, &2, application_id))
+
   defp change(conn, id, action) do
     user = conn.assigns.current_user
 

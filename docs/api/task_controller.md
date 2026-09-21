@@ -20,7 +20,7 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 | API 值 | 界面文案 | 下一步 |
 | --- | --- | --- |
 | `draft` | 草稿 | 发布者发布；只有发布者本人可见 |
-| `open` | 招募中 | 截止前用户申请；发布者可继续从已有候选中选人 |
+| `open` | 招募中 / 申请已截止 | `application_closed` 区分是否截止；发布者仍可从已有候选中选人 |
 | `in_progress` | 进行中 | 承作人提交结果 |
 | `under_review` | 待验收 | 发布者认可结果，或不认可并说明理由 |
 | `completed` | 已完成 | 终态；继续出现在承作人的历史记录 |
@@ -152,7 +152,8 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 发布者和申请人本人可见该申请的结果，公众看不到申请列表。
 
 申请只新增可空的 `rejected_at` 时间用于记住主动拒绝；旧记录的空值继续按原规则计算状态。
-同一招募中任务重复拒绝返回成功，但只发送一次 `application_not_selected` 通知。
+同一招募中任务重复拒绝返回成功，但只发送一次 `application_rejected` 通知。
+`application_not_selected` 仅用于发布者任命了其他候选的情况。
 非发布者返回 `403`，不存在或不属于该任务的申请返回 `404`，已任命或任务已结束返回 `409`。
 拒绝和任命共用任务行锁，先被拒绝的申请不能再被任命。
 
@@ -203,7 +204,7 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 - `GET /api/task_notifications`：当前用户最近 50 条任务通知。
 - `POST /api/task_notifications/read`：把当前用户未读任务通知标记为已读，成功返回 `204`。
 
-通知事件包括 `application_created`、`assignee_appointed`、`application_not_selected`、
+通知事件包括 `application_created`、`assignee_appointed`、`application_rejected`、`application_not_selected`、
 `task_cancelled`、`task_overdue`、`result_submitted`、`result_approved` 和
 `changes_requested`。新前端统一使用 [业务通知](wallet_and_inbox.md)；旧任务通知读取路径仍可用。
 

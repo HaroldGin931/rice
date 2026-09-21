@@ -192,6 +192,164 @@ defmodule Rice.EventsTest do
     assert Events.list_events(ctx.first, %{"mine" => "applied"}).entries |> length() == 1
   end
 
+  test "本人可在报名截止后开始前撤销，退回原费用且不能重报或重复退款", ctx do
+    event = event!(ctx)
+    {:ok, event} = Events.apply(ctx.first, event, %{})
+    own = application(event, ctx.first)
+
+    event
+    |> Ecto.Changeset.change(application_deadline: DateTime.add(DateTime.utc_now(), -1))
+    |> Repo.update!()
+
+    assert {:ok, event} = Events.fetch_event(event.id, ctx.first)
+    assert Events.application_actions(event, own, ctx.first) == ["withdraw"]
+    assert balances(ctx.first) == {80, 20}
+    assert {:ok, withdrawn} = Events.withdraw_application(ctx.first, event, own.id)
+    assert withdrawn.status == "open"
+    assert application(withdrawn, ctx.first).status == "withdrawn"
+    assert application(withdrawn, ctx.first).payment_status == "refunded"
+    assert balances(ctx.first) == {100, 0}
+
+    assert Events.application_actions(withdrawn, application(withdrawn, ctx.first), ctx.first) ==
+             []
+
+    refute "apply" in Events.allowed_actions(withdrawn, ctx.first)
+
+    assert {:ok, _} = Events.withdraw_application(ctx.first, event, own.id)
+    assert {:ok, repeated} = Events.apply(ctx.first, event, %{})
+    assert application(repeated, ctx.first).id == own.id
+    assert application(repeated, ctx.first).status == "withdrawn"
+    assert {:error, :conflict} = Events.approve_application(ctx.host, event, own.id)
+    assert {:ok, _} = Events.cancel(ctx.host, event)
+    assert {:ok, _} = Events.withdraw_application(ctx.first, event, own.id)
+    assert balances(ctx.first) == {100, 0}
+    uri = "rice://event_applications/#{own.id}"
+
+    assert Repo.aggregate(
+             from(r in Rice.Grains.Receipt, where: r.subject_uri == ^uri and r.kind == "refunded"),
+             :count
+           ) == 1
+
+    assert Repo.aggregate(
+             from(h in EventHistory,
+               where: h.application_id == ^own.id and h.action == "application_withdrawn"
+             ),
+             :count
+           ) == 1
+
+    assert Repo.aggregate(
+             from(n in Rice.Tasks.Notification,
+               where: n.subject_id == ^event.id and n.event == "event_application_withdrawn"
+             ),
+             :count
+           ) == 1
+
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "免费申请撤销不产生冻结或退款凭证", ctx do
+    event = event!(ctx, %{fee_amount: 0})
+    {:ok, event} = Events.apply(ctx.first, event, %{})
+    own = application(event, ctx.first)
+    assert {:ok, withdrawn} = Events.withdraw_application(ctx.first, event, own.id)
+    assert application(withdrawn, ctx.first).status == "withdrawn"
+    assert application(withdrawn, ctx.first).payment_status == "none"
+    assert balances(ctx.first) == {100, 0}
+    assert Repo.aggregate(Rice.Grains.Receipt, :count) == 0
+  end
+
+  test "只能撤销本人且属于本场的申请，主办者不能代撤销", ctx do
+    event = event!(ctx)
+    {:ok, event} = Events.apply(ctx.first, event, %{})
+    own = application(event, ctx.first)
+    other_event = event!(ctx)
+
+    assert {:error, :forbidden} = Events.withdraw_application(ctx.second, event, own.id)
+    assert {:error, :forbidden} = Events.withdraw_application(ctx.host, event, own.id)
+    assert {:error, :not_found} = Events.withdraw_application(ctx.first, other_event, own.id)
+    assert {:error, :not_found} = Events.withdraw_application(ctx.first, event, "invalid")
+
+    assert {:error, :not_found} =
+             Events.withdraw_application(ctx.first, event, Rice.Tsid.generate())
+
+    assert Repo.get!(Application, own.id).status == "pending"
+    assert balances(ctx.first) == {80, 20}
+  end
+
+  test "已通过或其他已结束申请不能自助撤销", ctx do
+    for action <- [:approved, :removed, :rejected, :cancelled, :not_selected] do
+      event = event!(ctx, %{fee_amount: 0})
+      {:ok, event} = Events.apply(ctx.first, event, %{})
+      own = application(event, ctx.first)
+
+      case action do
+        :approved ->
+          assert {:ok, _} = Events.approve_application(ctx.host, event, own.id)
+
+        :removed ->
+          assert {:ok, _} = Events.approve_application(ctx.host, event, own.id)
+          assert {:ok, _} = Events.remove_application(ctx.host, event, own.id)
+
+        :rejected ->
+          assert {:ok, _} = Events.reject_application(ctx.host, event, own.id)
+
+        :cancelled ->
+          assert {:ok, _} = Events.cancel(ctx.host, event)
+
+        :not_selected ->
+          assert {:ok, _} = Events.start_event(event.id, event.starts_at)
+      end
+
+      assert {:error, :conflict} = Events.withdraw_application(ctx.first, event, own.id)
+      assert {:ok, current} = Events.fetch_event(event.id, ctx.first)
+      assert application(current, ctx.first).status == Atom.to_string(action)
+      assert Events.application_actions(current, application(current, ctx.first), ctx.first) == []
+    end
+  end
+
+  test "到达开始时间即不能撤销，尚未执行定时任务也不能绕过", ctx do
+    event = event!(ctx)
+    {:ok, event} = Events.apply(ctx.first, event, %{})
+    own = application(event, ctx.first)
+    now = DateTime.utc_now()
+
+    event
+    |> Ecto.Changeset.change(application_deadline: DateTime.add(now, -1), starts_at: now)
+    |> Repo.update!()
+
+    assert {:error, :conflict} = Events.withdraw_application(ctx.first, event, own.id)
+    assert {:ok, current} = Events.fetch_event(event.id, ctx.first)
+    assert current.status == "open"
+    assert application(current, ctx.first).status == "pending"
+    assert Events.application_actions(current, application(current, ctx.first), ctx.first) == []
+    assert balances(ctx.first) == {80, 20}
+
+    assert {:ok, _} = Events.start_event(event.id)
+    assert Repo.get!(Application, own.id).status == "not_selected"
+    assert balances(ctx.first) == {100, 0}
+  end
+
+  test "撤销退款失败时不写半成功状态或历史", ctx do
+    event = event!(ctx)
+    {:ok, event} = Events.apply(ctx.first, event, %{})
+    own = application(event, ctx.first)
+    uri = "rice://event_applications/#{own.id}"
+    Repo.delete_all(from(r in Rice.Grains.Receipt, where: r.subject_uri == ^uri))
+
+    assert {:error, :grain_reservation_missing} =
+             Events.withdraw_application(ctx.first, event, own.id)
+
+    assert Repo.get!(Application, own.id).status == "pending"
+    assert Repo.get!(Application, own.id).payment_status == "reserved"
+    assert balances(ctx.first) == {80, 20}
+
+    refute Repo.exists?(
+             from(h in EventHistory,
+               where: h.application_id == ^own.id and h.action == "application_withdrawn"
+             )
+           )
+  end
+
   defp attrs(node, extra \\ %{}) do
     now = DateTime.utc_now()
 

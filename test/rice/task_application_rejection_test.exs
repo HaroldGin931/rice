@@ -27,7 +27,8 @@ defmodule Rice.TaskApplicationRejectionTest do
 
     assert {:ok, repeated} = Tasks.reject_application(publisher, task, application.id)
     assert hd(repeated.applications).rejected_at == rejected_at
-    assert [%{event: "application_not_selected"}] = Tasks.list_notifications(rejected)
+    assert [%{event: "application_rejected"}] = Tasks.list_notifications(rejected)
+    assert [%{reason: "task-application_rejected"}] = Rice.Inbox.list(rejected)
     assert {:error, :conflict} = Tasks.appoint(publisher, task, application.id)
 
     assert {:ok, duplicate} = Tasks.apply(rejected, task, %{reason: "再试一次"})
@@ -38,7 +39,7 @@ defmodule Rice.TaskApplicationRejectionTest do
     assert {:ok, other_application} = Tasks.apply(selected, task, %{})
     assert {:ok, appointed} = Tasks.appoint(publisher, task, other_application.id)
     assert appointed.assignee_id == selected.id
-    assert [%{event: "application_not_selected"}] = Tasks.list_notifications(rejected)
+    assert [%{event: "application_rejected"}] = Tasks.list_notifications(rejected)
     assert [%{event: "assignee_appointed"}] = Tasks.list_notifications(selected)
 
     assert %{grain_balance: 40, grain_frozen_balance: 60} =
