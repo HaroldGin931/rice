@@ -156,7 +156,9 @@ defmodule RiceWeb.Api.RegistrationControllerTest do
       expect(Rice.PDSMock, :email_domain, fn -> "web5.xjdao.test" end)
 
       expect(Rice.PDSMock, :create_account, fn %{handle: handle} ->
-        assert handle =~ ~r/^u[a-f0-9]{24}\.web5\.xjdao\.test$/
+        assert handle =~ ~r/^u[a-f0-9]{16}\.web5\.xjdao\.test$/
+        # 与真实 PDS 的服务子域约束保持一致,不能只校验通用域名格式。
+        assert String.length(hd(String.split(handle, "."))) in 3..18
         refute handle =~ "13800000000"
         refute handle =~ "alice"
 

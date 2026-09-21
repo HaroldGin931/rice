@@ -83,8 +83,9 @@ defmodule RiceWeb.Api.RegistrationController do
   defp verify_ticket(_), do: {:error, :invalid_ticket}
 
   # 同一张已验签的票重试时保持同一账号标识;不把手机号或邮箱放进公开 handle。
+  # PDS 服务子域前缀最多 18 字符;u + 16 位十六进制共 17 字符。
   defp registration_handle(ticket) do
-    suffix = :crypto.hash(:sha256, ticket) |> binary_part(0, 12) |> Base.encode16(case: :lower)
+    suffix = :crypto.hash(:sha256, ticket) |> binary_part(0, 8) |> Base.encode16(case: :lower)
     "u#{suffix}.#{Rice.PDS.Api.impl().handle_domain()}"
   end
 
