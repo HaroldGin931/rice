@@ -5,6 +5,7 @@ defmodule Rice.Events.Event do
   schema "events" do
     field :title, :string
     field :description, :string
+    field :organizer_contact, :string
     field :location, :string
     field :status, :string, default: "draft"
     field :application_deadline, :utc_datetime_usec
@@ -16,6 +17,7 @@ defmodule Rice.Events.Event do
     field :client_request_id, :string
     belongs_to :creator, Rice.Accounts.User
     belongs_to :node, Rice.Community.Node
+    belongs_to :settlement_node, Rice.Community.Node
     has_many :applications, Rice.Events.Application
     has_many :history, Rice.Events.EventHistory
     has_many :image_links, Rice.Events.Image, on_replace: :delete, preload_order: [asc: :position]
@@ -27,6 +29,7 @@ defmodule Rice.Events.Event do
     |> cast(attrs, [
       :title,
       :description,
+      :organizer_contact,
       :location,
       :application_deadline,
       :starts_at,
@@ -47,6 +50,9 @@ defmodule Rice.Events.Event do
     ])
     |> update_change(:title, &trim/1)
     |> update_change(:description, &trim/1)
+    |> update_change(:organizer_contact, &trim/1)
+    |> validate_length(:organizer_contact, max: 256)
+    |> validate_organizer_contact()
     |> update_change(:location, &trim/1)
     |> validate_length(:title, min: 1, max: 128)
     |> validate_length(:description, min: 1, max: 8000)
@@ -64,7 +70,14 @@ defmodule Rice.Events.Event do
     |> Rice.Files.put_images(attrs, event.creator_id)
   end
 
-  def publish_changeset(event), do: event |> change() |> validate_times()
+  def publish_changeset(event),
+    do: event |> change() |> validate_required([:organizer_contact]) |> validate_times()
+
+  defp validate_organizer_contact(changeset) do
+    if get_field(changeset, :status) == "draft",
+      do: changeset,
+      else: validate_required(changeset, [:organizer_contact])
+  end
 
   defp validate_times(changeset) do
     deadline = get_field(changeset, :application_deadline)

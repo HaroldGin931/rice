@@ -33,12 +33,12 @@ defmodule Rice.EventsTest do
 
   test "所有候选均可申请，冻结不占名额，通过时才检查容量", ctx do
     event = event!(ctx)
-    assert {:ok, one} = Events.apply(ctx.first, event, %{reason: "私人申请资料"})
-    assert {:ok, two} = Events.apply(ctx.second, event, %{})
+    assert {:ok, one} = Events.apply(ctx.first, event, %{contact: "测试联系方式", reason: "私人申请资料"})
+    assert {:ok, two} = Events.apply(ctx.second, event, %{contact: "测试联系方式"})
     assert length(two.applications) == 2
     assert balances(ctx.first) == {80, 20}
     assert balances(ctx.second) == {80, 20}
-    assert {:ok, repeat} = Events.apply(ctx.first, event, %{})
+    assert {:ok, repeat} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
     assert length(repeat.applications) == 2
     assert balances(ctx.first) == {80, 20}
     a = application(one, ctx.first)
@@ -55,7 +55,7 @@ defmodule Rice.EventsTest do
     user = user_fixture()
     event = event!(ctx)
     before = Repo.aggregate(EventHistory, :count)
-    assert {:error, :insufficient_balance} = Events.apply(user, event, %{})
+    assert {:error, :insufficient_balance} = Events.apply(user, event, %{contact: "测试联系方式"})
     assert Repo.aggregate(Application, :count) == 0
     assert Repo.aggregate(EventHistory, :count) == before
     assert balances(user) == {0, 0}
@@ -63,8 +63,8 @@ defmodule Rice.EventsTest do
 
   test "拒绝和移除分别退款且释放名额，重试不重复退，拒绝后不重报", ctx do
     event = event!(ctx)
-    {:ok, event} = Events.apply(ctx.first, event, %{})
-    {:ok, event} = Events.apply(ctx.second, event, %{})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
+    {:ok, event} = Events.apply(ctx.second, event, %{contact: "测试联系方式"})
     a = application(event, ctx.first)
     b = application(event, ctx.second)
     assert {:ok, _} = Events.approve_application(ctx.host, event, a.id)
@@ -76,14 +76,14 @@ defmodule Rice.EventsTest do
     assert {:ok, _} = Events.cancel(ctx.host, event)
     assert balances(ctx.second) == {100, 0}
     assert {:error, :conflict} = Events.finish(ctx.host, event)
-    assert {:ok, revisit} = Events.apply(ctx.first, event, %{})
+    assert {:ok, revisit} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
     assert application(revisit, ctx.first).status == "removed"
 
     another = event!(ctx)
-    {:ok, another} = Events.apply(ctx.first, another, %{})
+    {:ok, another} = Events.apply(ctx.first, another, %{contact: "测试联系方式"})
     a = application(another, ctx.first)
     assert {:ok, _} = Events.reject_application(ctx.host, another, a.id)
-    assert {:ok, repeat} = Events.apply(ctx.first, another, %{})
+    assert {:ok, repeat} = Events.apply(ctx.first, another, %{contact: "测试联系方式"})
     assert application(repeat, ctx.first).status == "rejected"
     assert balances(ctx.first) == {100, 0}
     assert Rice.Grains.reconcile().ok?
@@ -91,8 +91,8 @@ defmodule Rice.EventsTest do
 
   test "截止只关闭新申请，开始自动退未入选，结束须主办方确认才结算", ctx do
     event = event!(ctx)
-    {:ok, event} = Events.apply(ctx.first, event, %{})
-    {:ok, event} = Events.apply(ctx.second, event, %{})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
+    {:ok, event} = Events.apply(ctx.second, event, %{contact: "测试联系方式"})
     a = application(event, ctx.first)
     b = application(event, ctx.second)
 
@@ -101,7 +101,7 @@ defmodule Rice.EventsTest do
     )
 
     assert {:ok, _} = Events.approve_application(ctx.host, event, a.id)
-    assert {:error, :conflict} = Events.apply(user_fixture(), event, %{})
+    assert {:error, :conflict} = Events.apply(user_fixture(), event, %{contact: "测试联系方式"})
     assert {:error, :conflict} = Events.finish(ctx.host, event)
     age_event!(event)
     assert :ok = Events.start_due_events()
@@ -117,7 +117,8 @@ defmodule Rice.EventsTest do
     assert finished.status == "completed"
     assert application(finished, ctx.first).payment_status == "settled"
     assert balances(ctx.first) == {80, 0}
-    assert balances(ctx.host) == {20, 0}
+    assert balances(ctx.host) == {0, 0}
+    assert Repo.get!(Rice.Community.Node, ctx.node.id).grain_balance == 20
     assert {:error, :conflict} = Events.cancel(ctx.host, event)
     assert {:error, :conflict} = Events.remove_application(ctx.host, event, a.id)
     assert Rice.Grains.reconcile().ok?
@@ -125,8 +126,8 @@ defmodule Rice.EventsTest do
 
   test "退款异常回滚整场开始，恢复原冻结后系统原任务可重试", ctx do
     event = event!(ctx)
-    {:ok, event} = Events.apply(ctx.first, event, %{})
-    {:ok, event} = Events.apply(ctx.second, event, %{})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
+    {:ok, event} = Events.apply(ctx.second, event, %{contact: "测试联系方式"})
     users = Enum.sort_by([ctx.first, ctx.second], & &1.id)
     [healthy, broken] = users
 
@@ -154,8 +155,8 @@ defmodule Rice.EventsTest do
 
   test "免费活动执行相同审批和开始规则，完全不产生资金操作", ctx do
     event = event!(ctx, %{fee_amount: 0})
-    {:ok, event} = Events.apply(ctx.first, event, %{})
-    {:ok, event} = Events.apply(ctx.second, event, %{})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
+    {:ok, event} = Events.apply(ctx.second, event, %{contact: "测试联系方式"})
     a = application(event, ctx.first)
     assert {:ok, _} = Events.approve_application(ctx.host, event, a.id)
     age_event!(event)
@@ -177,8 +178,8 @@ defmodule Rice.EventsTest do
 
   test "公开详情隐藏候选理由和余额，本人仅见本人申请，主办方见全部", ctx do
     event = event!(ctx)
-    {:ok, event} = Events.apply(ctx.first, event, %{reason: "私人甲"})
-    {:ok, event} = Events.apply(ctx.second, event, %{reason: "私人乙"})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式", reason: "私人甲"})
+    {:ok, event} = Events.apply(ctx.second, event, %{contact: "测试联系方式", reason: "私人乙"})
     public = RiceWeb.Api.EventJSON.show(%{event: event, current_user: nil}).data
     own = RiceWeb.Api.EventJSON.show(%{event: event, current_user: ctx.first}).data
     host = RiceWeb.Api.EventJSON.show(%{event: event, current_user: ctx.host}).data
@@ -194,7 +195,7 @@ defmodule Rice.EventsTest do
 
   test "本人可在报名截止后开始前撤销，退回原费用且不能重报或重复退款", ctx do
     event = event!(ctx)
-    {:ok, event} = Events.apply(ctx.first, event, %{})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
     own = application(event, ctx.first)
 
     event
@@ -216,7 +217,7 @@ defmodule Rice.EventsTest do
     refute "apply" in Events.allowed_actions(withdrawn, ctx.first)
 
     assert {:ok, _} = Events.withdraw_application(ctx.first, event, own.id)
-    assert {:ok, repeated} = Events.apply(ctx.first, event, %{})
+    assert {:ok, repeated} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
     assert application(repeated, ctx.first).id == own.id
     assert application(repeated, ctx.first).status == "withdrawn"
     assert {:error, :conflict} = Events.approve_application(ctx.host, event, own.id)
@@ -249,7 +250,7 @@ defmodule Rice.EventsTest do
 
   test "免费申请撤销不产生冻结或退款凭证", ctx do
     event = event!(ctx, %{fee_amount: 0})
-    {:ok, event} = Events.apply(ctx.first, event, %{})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
     own = application(event, ctx.first)
     assert {:ok, withdrawn} = Events.withdraw_application(ctx.first, event, own.id)
     assert application(withdrawn, ctx.first).status == "withdrawn"
@@ -260,7 +261,7 @@ defmodule Rice.EventsTest do
 
   test "只能撤销本人且属于本场的申请，主办者不能代撤销", ctx do
     event = event!(ctx)
-    {:ok, event} = Events.apply(ctx.first, event, %{})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
     own = application(event, ctx.first)
     other_event = event!(ctx)
 
@@ -279,7 +280,7 @@ defmodule Rice.EventsTest do
   test "已通过或其他已结束申请不能自助撤销", ctx do
     for action <- [:approved, :removed, :rejected, :cancelled, :not_selected] do
       event = event!(ctx, %{fee_amount: 0})
-      {:ok, event} = Events.apply(ctx.first, event, %{})
+      {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
       own = application(event, ctx.first)
 
       case action do
@@ -309,7 +310,7 @@ defmodule Rice.EventsTest do
 
   test "到达开始时间即不能撤销，尚未执行定时任务也不能绕过", ctx do
     event = event!(ctx)
-    {:ok, event} = Events.apply(ctx.first, event, %{})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
     own = application(event, ctx.first)
     now = DateTime.utc_now()
 
@@ -331,7 +332,7 @@ defmodule Rice.EventsTest do
 
   test "撤销退款失败时不写半成功状态或历史", ctx do
     event = event!(ctx)
-    {:ok, event} = Events.apply(ctx.first, event, %{})
+    {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
     own = application(event, ctx.first)
     uri = "rice://event_applications/#{own.id}"
     Repo.delete_all(from(r in Rice.Grains.Receipt, where: r.subject_uri == ^uri))
@@ -355,6 +356,7 @@ defmodule Rice.EventsTest do
 
     Map.merge(
       %{
+        organizer_contact: "社区服务台",
         node_id: node.id,
         client_request_id: "event-#{System.unique_integer([:positive])}",
         title: "社区活动",

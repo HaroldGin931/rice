@@ -6,10 +6,11 @@ defmodule Rice.TasksTest do
   test "任务奖励在发布时冻结，在认可结果时发给承作人" do
     publisher = task_publisher_fixture()
     worker = user_fixture()
-    {:ok, _} = Rice.Grains.grant(publisher, 300, memo: "测试初始稻米")
+    node = funded_node_fixture(publisher, 300)
 
     assert {:ok, task} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "有奖励的任务",
                description: "完成后发放",
                reward_amount: 120
@@ -18,9 +19,9 @@ defmodule Rice.TasksTest do
     assert task.reward_status == "reserved"
 
     assert %{grain_balance: 180, grain_frozen_balance: 120} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
-    assert {:ok, application} = Tasks.apply(worker, task, %{})
+    assert {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
     assert {:ok, task} = Tasks.appoint(publisher, task, application.id)
     assert {:ok, task} = Tasks.submit_result(worker, task, %{body: "已完成"})
     submission = Enum.find(task.submissions, &is_nil(&1.review_reason))
@@ -29,7 +30,7 @@ defmodule Rice.TasksTest do
     assert completed.reward_status == "settled"
 
     assert %{grain_balance: 180, grain_frozen_balance: 0} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
     assert %{grain_balance: 120} = Repo.get!(Rice.Accounts.User, worker.id)
 
@@ -42,10 +43,11 @@ defmodule Rice.TasksTest do
 
   test "草稿不冻结，发布时才冻结；取消后自动退回" do
     publisher = task_publisher_fixture()
-    {:ok, _} = Rice.Grains.grant(publisher, 200)
+    node = funded_node_fixture(publisher, 200)
 
     assert {:ok, draft} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "奖励草稿",
                description: "发布后冻结",
                status: "draft",
@@ -55,42 +57,46 @@ defmodule Rice.TasksTest do
     assert draft.reward_status == "none"
 
     assert %{grain_balance: 200, grain_frozen_balance: 0} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
     assert {:ok, task} = Tasks.publish_draft(publisher, draft)
     assert task.reward_status == "reserved"
 
     assert %{grain_balance: 120, grain_frozen_balance: 80} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
     assert {:ok, cancelled} = Tasks.cancel(publisher, task)
     assert cancelled.reward_status == "refunded"
 
     assert %{grain_balance: 200, grain_frozen_balance: 0} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
     assert Rice.Grains.reconcile().ok?
   end
 
   test "余额不足时任务发布与冻结一起回滚" do
     publisher = task_publisher_fixture()
+    {:ok, _} = Rice.Grains.grant(publisher, 100)
 
     assert {:error, :insufficient_balance} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "余额不足",
                description: "不能公开",
                reward_amount: 1
              })
 
     assert Repo.aggregate(Rice.Tasks.Task, :count) == 0
+    assert %{balance: 100, frozen: 0} = Rice.Grains.wallet(publisher)
   end
 
   test "发布重读草稿，冻结当前金额并可按同一金额退款" do
     publisher = task_publisher_fixture()
-    {:ok, _} = Rice.Grains.grant(publisher, 200)
+    node = funded_node_fixture(publisher, 200)
 
     {:ok, stale_draft} =
       Tasks.create_task(publisher, %{
+        organizer_contact: "社区服务台",
         title: "更新中的草稿",
         description: "发布时以当前约定为准",
         status: "draft",
@@ -103,21 +109,22 @@ defmodule Rice.TasksTest do
     assert published.reward_amount == 120
 
     assert %{grain_balance: 80, grain_frozen_balance: 120} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
     assert %{amount: 120, kind: "reserved"} = Repo.one!(Rice.Grains.Receipt)
     assert {:ok, _} = Tasks.cancel(publisher, published)
 
     assert %{grain_balance: 200, grain_frozen_balance: 0} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
   end
 
   test "草稿交付期限已过时不能发布，保留草稿且不冻结" do
     publisher = task_publisher_fixture()
-    {:ok, _} = Rice.Grains.grant(publisher, 100)
+    node = funded_node_fixture(publisher, 100)
 
     {:ok, stale_draft} =
       Tasks.create_task(publisher, %{
+        organizer_contact: "社区服务台",
         title: "有交付期限的草稿",
         description: "过期应先修改",
         status: "draft",
@@ -134,7 +141,7 @@ defmodule Rice.TasksTest do
     assert Repo.get!(Rice.Tasks.Task, stale_draft.id).status == "draft"
 
     assert %{grain_balance: 100, grain_frozen_balance: 0} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
     assert Repo.aggregate(Rice.Grains.Receipt, :count) == 0
   end
@@ -143,8 +150,8 @@ defmodule Rice.TasksTest do
     publisher = task_publisher_fixture()
     worker = user_fixture()
     task = task_fixture(publisher)
-    assert {:ok, first} = Tasks.apply(worker, task, %{reason: "可以参与"})
-    assert {:ok, repeated} = Tasks.apply(worker, task, %{reason: "重试请求"})
+    assert {:ok, first} = Tasks.apply(worker, task, %{contact: "测试联系方式", reason: "可以参与"})
+    assert {:ok, repeated} = Tasks.apply(worker, task, %{contact: "测试联系方式", reason: "重试请求"})
     assert repeated.id == first.id
     assert repeated.reason == "可以参与"
     assert Repo.aggregate(Rice.Tasks.Application, :count) == 1
@@ -158,11 +165,15 @@ defmodule Rice.TasksTest do
     other = user_fixture()
 
     assert {:ok, task} =
-             Tasks.create_task(publisher, %{title: "整理访谈", description: "完成文字稿"})
+             Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
+               title: "整理访谈",
+               description: "完成文字稿"
+             })
 
     assert task.status == "open"
-    assert {:ok, application} = Tasks.apply(worker, task, %{reason: "有口述史经验"})
-    assert {:ok, _} = Tasks.apply(other, task, %{reason: "也可以承做"})
+    assert {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式", reason: "有口述史经验"})
+    assert {:ok, _} = Tasks.apply(other, task, %{contact: "测试联系方式", reason: "也可以承做"})
 
     assert [pending] = Tasks.list_tasks(worker, %{"mine" => "applied"}).entries
     assert pending.id == task.id
@@ -232,16 +243,32 @@ defmodule Rice.TasksTest do
     user = user_fixture()
 
     assert {:error, :forbidden} =
-             Tasks.create_task(user, %{title: "普通用户任务", description: "不能发布"})
+             Tasks.create_task(user, %{
+               organizer_contact: "社区服务台",
+               title: "普通用户任务",
+               description: "不能发布"
+             })
 
     publisher = task_publisher_fixture()
-    assert {:ok, task} = Tasks.create_task(publisher, %{title: "社区任务", description: "公开参与"})
-    assert {:error, :forbidden} = Tasks.apply(publisher, task, %{})
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
+               title: "社区任务",
+               description: "公开参与"
+             })
+
+    assert {:error, :forbidden} = Tasks.apply(publisher, task, %{contact: "测试联系方式"})
 
     assert {:error, :forbidden} =
-             Tasks.create_task(user, %{title: "冒用社区", description: "不能发布", node_id: task.node_id})
+             Tasks.create_task(user, %{
+               organizer_contact: "社区服务台",
+               title: "冒用社区",
+               description: "不能发布",
+               node_id: task.node_id
+             })
 
-    assert {:ok, _application} = Tasks.apply(user, task, %{})
+    assert {:ok, _application} = Tasks.apply(user, task, %{contact: "测试联系方式"})
   end
 
   test "公开履历只列已承接任务，不暴露待选申请" do
@@ -253,13 +280,14 @@ defmodule Rice.TasksTest do
 
     assert {:ok, _draft} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "未公开草稿",
                description: "不进入公开履历",
                status: "draft"
              })
 
-    assert {:ok, application} = Tasks.apply(worker, task, %{})
-    assert {:ok, _application} = Tasks.apply(other, other_task, %{})
+    assert {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
+    assert {:ok, _application} = Tasks.apply(other, other_task, %{contact: "测试联系方式"})
 
     assert Tasks.list_tasks(nil, %{"participant_did" => worker.did}).entries == []
     assert {:ok, _appointed} = Tasks.appoint(publisher, task, application.id)
@@ -279,7 +307,7 @@ defmodule Rice.TasksTest do
     publisher = task_publisher_fixture()
     worker = user_fixture()
     task = task_fixture(publisher)
-    {:ok, application} = Tasks.apply(worker, task, %{})
+    {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
     {:ok, task} = Tasks.appoint(publisher, task, application.id)
     {:ok, task} = Tasks.submit_result(worker, task, %{body: "已完成"})
     submission = Enum.find(task.submissions, &is_nil(&1.review_reason))
@@ -291,12 +319,17 @@ defmodule Rice.TasksTest do
   test "新一轮交付不能被旧结果的验收或驳回请求推进" do
     publisher = task_publisher_fixture()
     worker = user_fixture()
-    {:ok, _} = Rice.Grains.grant(publisher, 100)
+    node = funded_node_fixture(publisher, 100)
 
     {:ok, task} =
-      Tasks.create_task(publisher, %{title: "反复校对", description: "以本轮交付为准", reward_amount: 60})
+      Tasks.create_task(publisher, %{
+        organizer_contact: "社区服务台",
+        title: "反复校对",
+        description: "以本轮交付为准",
+        reward_amount: 60
+      })
 
-    {:ok, application} = Tasks.apply(worker, task, %{})
+    {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
     {:ok, task} = Tasks.appoint(publisher, task, application.id)
     {:ok, first_review} = Tasks.submit_result(worker, task, %{body: "旧版本"})
     first_submission = Enum.find(first_review.submissions, &is_nil(&1.review_reason))
@@ -314,7 +347,7 @@ defmodule Rice.TasksTest do
     assert is_nil(Repo.get!(Rice.Tasks.Submission, second_submission.id).review_reason)
 
     assert %{grain_balance: 40, grain_frozen_balance: 60} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
     assert Repo.get!(Rice.Accounts.User, worker.id).grain_balance == 0
     assert {:ok, completed} = Tasks.approve_result(publisher, second_review, second_submission.id)
@@ -327,7 +360,10 @@ defmodule Rice.TasksTest do
     applicants = [user_fixture(), user_fixture()]
     task = task_fixture(publisher)
 
-    Enum.each(applicants, fn user -> assert {:ok, _} = Tasks.apply(user, task, %{}) end)
+    Enum.each(applicants, fn user ->
+      assert {:ok, _} = Tasks.apply(user, task, %{contact: "测试联系方式"})
+    end)
+
     assert {:ok, %{status: "cancelled"}} = Tasks.cancel(publisher, task)
 
     Enum.each(applicants, fn user ->
@@ -344,7 +380,7 @@ defmodule Rice.TasksTest do
     task = task_fixture(publisher)
 
     assert {:ok, _cancelled} = Tasks.cancel(publisher, task)
-    assert {:error, :conflict} = Tasks.apply(worker, task, %{})
+    assert {:error, :conflict} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
 
     expiring = task_fixture(publisher)
 
@@ -352,7 +388,7 @@ defmodule Rice.TasksTest do
     |> change(application_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
     |> Repo.update!()
 
-    assert {:error, :conflict} = Tasks.apply(worker, expiring, %{})
+    assert {:error, :conflict} = Tasks.apply(worker, expiring, %{contact: "测试联系方式"})
   end
 
   test "每位发布者只能保留一份草稿" do
@@ -360,6 +396,7 @@ defmodule Rice.TasksTest do
 
     assert {:ok, _draft} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "第一份草稿",
                description: "继续编辑这一份",
                status: "draft"
@@ -367,6 +404,7 @@ defmodule Rice.TasksTest do
 
     assert {:error, changeset} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "第二份草稿",
                description: "不应创建",
                status: "draft"
@@ -381,6 +419,7 @@ defmodule Rice.TasksTest do
 
     assert {:ok, draft} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "尚未发布",
                description: "只对发布者可见",
                status: "draft"
@@ -420,7 +459,7 @@ defmodule Rice.TasksTest do
     assert {:error, :forbidden} = Tasks.cancel(worker, task)
     assert {:ok, cancelled} = Tasks.cancel(publisher, task)
     assert cancelled.status == "cancelled"
-    assert {:error, :conflict} = Tasks.apply(worker, cancelled, %{})
+    assert {:error, :conflict} = Tasks.apply(worker, cancelled, %{contact: "测试联系方式"})
   end
 
   test "申请截止后停止新申请，已有候选仍可选定且截止记录不重复" do
@@ -428,9 +467,13 @@ defmodule Rice.TasksTest do
     worker = user_fixture()
 
     assert {:ok, task} =
-             Tasks.create_task(publisher, %{title: "申请即将截止", description: "保留已有候选"})
+             Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
+               title: "申请即将截止",
+               description: "保留已有候选"
+             })
 
-    assert {:ok, application} = Tasks.apply(worker, task, %{})
+    assert {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
 
     task =
       task
@@ -443,7 +486,7 @@ defmodule Rice.TasksTest do
     assert closed.status == "open"
     assert Enum.count(closed.events, &(&1.detail == "申请已截止")) == 1
     assert Enum.all?(closed.events, &(&1.to_status == "open"))
-    assert {:error, :conflict} = Tasks.apply(user_fixture(), closed, %{})
+    assert {:error, :conflict} = Tasks.apply(user_fixture(), closed, %{contact: "测试联系方式"})
     assert Tasks.list_notifications(worker) == []
     assert [history] = Tasks.list_tasks(worker, %{"mine" => "applied"}).entries
     assert history.id == task.id
@@ -454,17 +497,18 @@ defmodule Rice.TasksTest do
 
   test "申请截止不解冻，执行逾期保留承接人和报酬" do
     publisher = task_publisher_fixture()
-    {:ok, _} = Rice.Grains.grant(publisher, 100)
+    node = funded_node_fixture(publisher, 100)
 
     assert {:ok, task} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "到期保留",
                description: "保持原有约定",
                reward_amount: 70
              })
 
     worker = user_fixture()
-    assert {:ok, application} = Tasks.apply(worker, task, %{})
+    assert {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
 
     task
     |> change(application_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
@@ -474,7 +518,7 @@ defmodule Rice.TasksTest do
     assert %{status: "open", reward_status: "reserved"} = Repo.get!(Rice.Tasks.Task, task.id)
 
     assert %{grain_balance: 30, grain_frozen_balance: 70} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
     # 已选人后的交付逾期只记录状态，不能自动取消或发放报酬。
     assert {:ok, assigned} = Tasks.appoint(publisher, task, application.id)
@@ -492,7 +536,7 @@ defmodule Rice.TasksTest do
     assert Enum.count(Tasks.list_notifications(worker), &(&1.event == "task_overdue")) == 1
 
     assert %{grain_balance: 30, grain_frozen_balance: 70} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
   end
 
   test "任务列表支持后端关键词和结束状态筛选" do
@@ -513,6 +557,7 @@ defmodule Rice.TasksTest do
 
     assert {:ok, draft} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "同一搜索词的旧草稿",
                description: "稍后发布",
                status: "draft"
@@ -520,6 +565,7 @@ defmodule Rice.TasksTest do
 
     assert {:ok, older_public} =
              Tasks.create_task(publisher, %{
+               organizer_contact: "社区服务台",
                title: "同一搜索词的公开任务",
                description: "直接发布"
              })

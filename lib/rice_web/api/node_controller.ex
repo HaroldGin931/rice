@@ -1,5 +1,5 @@
 defmodule RiceWeb.Api.NodeController do
-  @moduledoc "公开节点目录与本人的入会申请；审批只允许该节点的唯一管理员。"
+  @moduledoc "公开节点目录、社区成员角色与入会申请。"
   use RiceWeb, :controller
 
   action_fallback RiceWeb.Api.FallbackController
@@ -48,6 +48,16 @@ defmodule RiceWeb.Api.NodeController do
 
   def approve(conn, params), do: review(conn, params, "approved")
   def reject(conn, params), do: review(conn, params, "rejected")
+
+  def update_member(conn, %{"node_id" => id, "user_id" => user_id} = params) do
+    user = conn.assigns.current_user
+
+    with {:ok, node} <- Community.fetch_node(id, user),
+         {:ok, _member} <- Community.set_member_role(user, node, user_id, params["role"]),
+         {:ok, node} <- Community.fetch_node(id, user) do
+      render(conn, :show, node: node, current_user: user)
+    end
+  end
 
   defp review(conn, %{"node_id" => id, "application_id" => application_id} = params, status) do
     user = conn.assigns.current_user

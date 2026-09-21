@@ -23,7 +23,15 @@ defmodule Rice.Events do
             on: a.event_id == e.id and a.user_id == ^user.id
           )
 
-        mine when mine in ["created", "applied"] and is_nil(user) ->
+        "managed" when not is_nil(user) ->
+          ids = Rice.Community.managed_node_ids(user)
+
+          from e in Event,
+            where:
+              e.creator_id == ^user.id or
+                (e.status != "draft" and not is_nil(e.settlement_node_id) and e.node_id in ^ids)
+
+        mine when mine in ["created", "applied", "managed"] and is_nil(user) ->
           where(query, [e], false)
 
         _ ->
@@ -141,12 +149,18 @@ defmodule Rice.Events do
                 %Event{
                   creator_id: user.id,
                   node_id: node_id,
+                  settlement_node_id: node_id,
                   status: status,
                   client_request_id: key,
                   published_at: if(status == "open", do: DateTime.utc_now())
                 }
 
-            changeset = event |> Event.changeset(attrs) |> Changeset.put_change(:node_id, node_id)
+            changeset =
+              event
+              |> Event.changeset(attrs)
+              |> Changeset.put_change(:node_id, node_id)
+              |> Changeset.put_change(:settlement_node_id, node_id)
+
             saved = unwrap!(Repo.insert_or_update(changeset))
             unless draft, do: record!(saved, user.id, nil, "created", nil, status)
             saved
@@ -163,7 +177,13 @@ defmodule Rice.Events do
       require!(current.status == "draft")
       node_id = attrs["node_id"] || current.node_id
       require_node!(user, node_id)
-      changeset = current |> Event.changeset(attrs) |> Changeset.put_change(:node_id, node_id)
+
+      changeset =
+        current
+        |> Event.changeset(attrs)
+        |> Changeset.put_change(:node_id, node_id)
+        |> Changeset.put_change(:settlement_node_id, node_id)
+
       unwrap!(Repo.update(changeset))
     end)
   end
@@ -178,7 +198,11 @@ defmodule Rice.Events do
 
         current.status == "draft" ->
           unwrap!(Repo.update(Event.publish_changeset(current)))
-          change_event!(current, user.id, "published", "open", published_at: DateTime.utc_now())
+
+          change_event!(current, user.id, "published", "open",
+            published_at: DateTime.utc_now(),
+            settlement_node_id: current.node_id
+          )
 
         true ->
           Repo.rollback(:conflict)
@@ -188,7 +212,7 @@ defmodule Rice.Events do
 
   def apply(user, event, attrs) do
     with_event(event.id, fn current ->
-      require!(current.creator_id != user.id, :forbidden)
+      require!(current.creator_id != user.id and not can_manage?(current, user), :forbidden)
       existing = Repo.get_by(Application, event_id: current.id, user_id: user.id)
 
       if existing do
@@ -223,7 +247,17 @@ defmodule Rice.Events do
             )
 
         record!(current, user.id, application.id, "applied", nil, "pending")
-        notify!(current, current.creator_id, user.id, "event_application_created", "有新的活动申请")
+
+        managers =
+          if current.settlement_node_id,
+            do: Rice.Community.admin_ids(Repo.get!(Node, current.settlement_node_id)),
+            else: [current.creator_id]
+
+        Enum.each(
+          managers,
+          &notify!(current, &1, user.id, "event_application_created", "有新的活动申请")
+        )
+
         current
       end
     end)
@@ -316,8 +350,13 @@ defmodule Rice.Events do
         now = DateTime.utc_now()
         require!(current.status in ["open", "in_progress"] and not before?(now, current.ends_at))
         # Acquire all relevant account locks in order before refunds and settlement.
-        lock_accounts!([
-          current.creator_id | Enum.map(active_applications(current), & &1.user_id)
+        recipient =
+          if current.settlement_node_id,
+            do: {:node, current.settlement_node_id},
+            else: current.creator_id
+
+        Grains.lock_business_accounts(Repo, [
+          recipient | Enum.map(active_applications(current), & &1.user_id)
         ])
 
         current = start_locked!(current, now)
@@ -338,7 +377,7 @@ defmodule Rice.Events do
               Grains.settle_business(
                 Repo,
                 application.user_id,
-                current.creator_id,
+                recipient,
                 application.fee_amount,
                 subject(application)
               )
@@ -380,7 +419,7 @@ defmodule Rice.Events do
 
   def allowed_actions(event, user) do
     now = DateTime.utc_now()
-    host? = event.creator_id == user.id and event.node.user_id == user.id
+    host? = can_manage?(event, user)
     own = Enum.find(event.applications, &(&1.user_id == user.id))
 
     [
@@ -405,7 +444,7 @@ defmodule Rice.Events do
         event.status == "open" and before?(DateTime.utc_now(), event.starts_at) ->
         ["withdraw"]
 
-      event.creator_id == user.id and event.node.user_id == user.id ->
+      can_manage?(event, user) ->
         cond do
           application.status == "pending" and event.status == "open" and
               before?(DateTime.utc_now(), event.starts_at) ->
@@ -530,16 +569,23 @@ defmodule Rice.Events do
     end
   end
 
-  defp require_host!(%User{id: id} = user, event) do
-    require!(id == event.creator_id, :forbidden)
-    require_node!(user, event.node_id)
-  end
+  def can_manage?(_event, nil), do: false
+
+  def can_manage?(%Event{status: "draft", creator_id: creator_id} = event, user),
+    do: creator_id == user.id and Rice.Community.admin?(Repo.get(Node, event.node_id), user)
+
+  def can_manage?(%Event{settlement_node_id: nil, creator_id: id}, %User{id: user_id}),
+    do: id == user_id
+
+  def can_manage?(event, user), do: Rice.Community.admin?(Repo.get(Node, event.node_id), user)
+
+  defp require_host!(user, event), do: require!(can_manage?(event, user), :forbidden)
 
   defp require_node!(user, node_id) do
     require!(Rice.Tsid.valid?(node_id), :forbidden)
 
     require!(
-      Repo.exists?(from(n in Node, where: n.id == ^node_id and n.user_id == ^user.id)),
+      Rice.Community.admin?(Repo.get(Node, node_id), user),
       :forbidden
     )
   end

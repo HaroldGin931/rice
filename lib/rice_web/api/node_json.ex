@@ -8,7 +8,7 @@ defmodule RiceWeb.Api.NodeJSON do
     data = Map.put(data(node, user), :members, members_for(node))
 
     data =
-      if user && node.user_id == user.id do
+      if Rice.Community.admin?(node, user) do
         Map.put(data, :applications, Enum.map(node.applications, &application(&1, true)))
       else
         data
@@ -46,6 +46,7 @@ defmodule RiceWeb.Api.NodeJSON do
 
     Map.merge(embed(node), %{
       role: role(node, user),
+      can_manage_members: not is_nil(user) and node.user_id == user.id,
       my_application: if(own_application, do: application(own_application))
     })
   end
@@ -53,8 +54,12 @@ defmodule RiceWeb.Api.NodeJSON do
   defp role(_node, nil), do: nil
   defp role(%{user_id: id}, %{id: id}), do: "admin"
 
-  defp role(node, user),
-    do: if(Enum.any?(node.memberships, &(&1.user_id == user.id)), do: "member")
+  defp role(node, user) do
+    case Enum.find(node.memberships, &(&1.user_id == user.id)) do
+      nil -> nil
+      membership -> membership.role
+    end
+  end
 
   defp members_for(node) do
     admin = if visible_user?(node.user), do: [%{user: owner(node.user), role: "admin"}], else: []
@@ -62,7 +67,7 @@ defmodule RiceWeb.Api.NodeJSON do
     members =
       node.memberships
       |> Enum.filter(&(&1.user_id != node.user_id and visible_user?(&1.user)))
-      |> Enum.map(&%{user: UserJSON.public(&1.user), role: "member"})
+      |> Enum.map(&%{user: UserJSON.public(&1.user), role: &1.role})
 
     admin ++ members
   end

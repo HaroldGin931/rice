@@ -16,7 +16,7 @@ defmodule RiceWeb.Api.EventJSON do
     visible =
       cond do
         not detail? or is_nil(user) -> []
-        event.creator_id == user.id and event.node.user_id == user.id -> event.applications
+        Events.can_manage?(event, user) -> event.applications
         own -> [own]
         true -> []
       end
@@ -25,6 +25,9 @@ defmodule RiceWeb.Api.EventJSON do
       id: event.id,
       title: event.title,
       description: event.description,
+      organizer_contact: event.organizer_contact,
+      settlement_node_id: event.settlement_node_id,
+      can_manage: Events.can_manage?(event, user),
       attachments: Enum.map(event.image_links, &AttachmentJSON.embed(&1.attachment)),
       status: event.status,
       location: event.location,
@@ -41,7 +44,7 @@ defmodule RiceWeb.Api.EventJSON do
       ends_at: event.ends_at,
       application_count: length(event.applications),
       approved_count: Enum.count(event.applications, &(&1.status == "approved")),
-      my_application: if(own, do: application(own, event, user)),
+      my_application: if(own, do: application(own, event, user, detail?)),
       applications: Enum.map(visible, &application(&1, event, user)),
       allowed_actions: Events.allowed_actions(event, user),
       history:
@@ -60,18 +63,20 @@ defmodule RiceWeb.Api.EventJSON do
     }
   end
 
-  defp application(item, event, user),
-    do: %{
-      id: item.id,
-      user: UserJSON.public(item.user),
-      reason: item.reason,
-      status: item.status,
-      payment_status: item.payment_status,
-      fee_amount: item.fee_amount,
-      allowed_actions: Events.application_actions(event, item, user),
-      inserted_at: item.inserted_at,
-      updated_at: item.updated_at
-    }
+  defp application(item, event, user, detail? \\ true),
+    do:
+      %{
+        id: item.id,
+        user: UserJSON.public(item.user),
+        reason: item.reason,
+        status: item.status,
+        payment_status: item.payment_status,
+        fee_amount: item.fee_amount,
+        allowed_actions: Events.application_actions(event, item, user),
+        inserted_at: item.inserted_at,
+        updated_at: item.updated_at
+      }
+      |> then(fn data -> if detail?, do: Map.put(data, :contact, item.contact), else: data end)
 
   defp history(item),
     do: %{

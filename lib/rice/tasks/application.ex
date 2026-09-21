@@ -4,6 +4,7 @@ defmodule Rice.Tasks.Application do
 
   schema "task_applications" do
     field(:reason, :string, default: "")
+    field(:contact, :string)
     field(:rejected_at, :utc_datetime_usec)
 
     belongs_to(:task, Rice.Tasks.Task)
@@ -14,8 +15,11 @@ defmodule Rice.Tasks.Application do
 
   def create_changeset(application, attrs) do
     application
-    |> cast(attrs, [:reason])
+    |> cast(attrs, [:reason, :contact])
     |> update_change(:reason, &trim/1)
+    |> update_change(:contact, &trim/1)
+    |> validate_required([:contact])
+    |> validate_length(:contact, max: 256)
     |> validate_length(:reason, max: 512)
     |> unique_constraint([:task_id, :user_id])
   end

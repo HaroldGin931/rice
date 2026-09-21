@@ -6,9 +6,12 @@ defmodule RiceWeb.Api.BusinessVisibilityTest do
     {worker, worker_token} = user_with_token()
     other = user_fixture()
     node_fixture(%{user_id: host.id})
-    {:ok, task} = Rice.Tasks.create_task(host, %{title: "任务", description: "交付内容"})
-    {:ok, selected} = Rice.Tasks.apply(worker, task, %{reason: "本人申请"})
-    {:ok, _} = Rice.Tasks.apply(other, task, %{reason: "其他人的申请"})
+
+    {:ok, task} =
+      Rice.Tasks.create_task(host, %{organizer_contact: "社区服务台", title: "任务", description: "交付内容"})
+
+    {:ok, selected} = Rice.Tasks.apply(worker, task, %{contact: "测试联系方式", reason: "本人申请"})
+    {:ok, _} = Rice.Tasks.apply(other, task, %{contact: "测试联系方式", reason: "其他人的申请"})
     {:ok, _} = Rice.Tasks.appoint(host, task, selected.id, %{appointment_reason: "内部选人说明"})
 
     own =

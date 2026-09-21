@@ -38,6 +38,9 @@ defmodule RiceWeb.Api.TaskJSON do
       id: task.id,
       title: task.title,
       description: task.description,
+      organizer_contact: task.organizer_contact,
+      funding_node_id: task.funding_node_id,
+      can_manage: Rice.Tasks.can_manage?(task, current_user),
       attachments:
         Enum.map(loaded(task.image_links), &RiceWeb.Api.AttachmentJSON.embed(&1.attachment)),
       requirement: task.requirement,
@@ -51,14 +54,16 @@ defmodule RiceWeb.Api.TaskJSON do
       application_deadline: task.application_deadline,
       appointed_at: task.appointed_at,
       appointment_reason:
-        if(current_user && current_user.id in [task.creator_id, task.assignee_id],
+        if(
+          current_user &&
+            (Rice.Tasks.can_manage?(task, current_user) || current_user.id == task.assignee_id),
           do: task.appointment_reason
         ),
       reward_amount: task.reward_amount,
       reward_status: task.reward_status,
       application_count: length(applications),
       my_application_status: my_application_status(task, applications, current_user),
-      my_application: my_application(task, applications, current_user),
+      my_application: my_application(task, applications, current_user, detail?),
       allowed_actions: allowed_actions(task, applications, current_user),
       applications: visible_applications(task, applications, current_user, detail?),
       submissions: visible_submissions(task, submissions, current_user, detail?),
@@ -69,23 +74,20 @@ defmodule RiceWeb.Api.TaskJSON do
     }
   end
 
-  defp visible_applications(
-         %{creator_id: user_id} = task,
-         applications,
-         %User{id: user_id},
-         true
-       ),
-       do: Enum.map(applications, &application(&1, task))
+  defp visible_applications(task, applications, %User{} = user, true),
+    do: if(Rice.Tasks.can_manage?(task, user), do: Enum.map(applications, &application(&1, task)))
 
   defp visible_applications(_task, _applications, _user, _detail?), do: nil
 
-  defp visible_submissions(task, submissions, %User{id: user_id}, true)
-       when user_id in [task.creator_id, task.assignee_id],
-       do: Enum.map(submissions, &submission(&1, task))
+  defp visible_submissions(task, submissions, %User{id: user_id} = user, true),
+    do:
+      if(user_id == task.assignee_id || Rice.Tasks.can_manage?(task, user),
+        do: Enum.map(submissions, &submission(&1, task))
+      )
 
   defp visible_submissions(_task, _submissions, _user, _detail?), do: nil
 
-  defp application(%Application{} = application, task) do
+  defp application(%Application{} = application, task, detail? \\ true) do
     %{
       id: application.id,
       reason: application.reason,
@@ -93,6 +95,9 @@ defmodule RiceWeb.Api.TaskJSON do
       user: public_user(application.user),
       inserted_at: application.inserted_at
     }
+    |> then(fn data ->
+      if detail?, do: Map.put(data, :contact, application.contact), else: data
+    end)
   end
 
   defp submission(%Submission{} = submission, task) do
@@ -106,21 +111,22 @@ defmodule RiceWeb.Api.TaskJSON do
     }
   end
 
-  defp my_application(_task, _applications, nil), do: nil
+  defp my_application(_task, _applications, nil, _detail?), do: nil
 
-  defp my_application(task, applications, user) do
+  defp my_application(task, applications, user, detail?) do
     case Enum.find(applications, &(&1.user_id == user.id)) do
       nil -> nil
-      own -> application(own, task)
+      own -> application(own, task, detail?)
     end
   end
 
   defp visible_events(task, events, user) do
-    private? = user && user.id in [task.creator_id, task.assignee_id]
+    manager? = Rice.Tasks.can_manage?(task, user)
+    private? = user && (manager? || user.id == task.assignee_id)
 
     events
     |> Enum.filter(fn e ->
-      e.detail != "收到任务申请" || (user && user.id in [task.creator_id, e.actor_id])
+      e.detail != "收到任务申请" || manager? || (user && user.id == e.actor_id)
     end)
     |> Enum.filter(fn e -> private? || e.from_status != e.to_status || e.detail == "申请已截止" end)
     |> Enum.map(fn e ->
@@ -145,25 +151,27 @@ defmodule RiceWeb.Api.TaskJSON do
 
   defp allowed_actions(_task, _applications, nil), do: []
 
-  defp allowed_actions(task, applications, %User{id: user_id}) do
+  defp allowed_actions(task, applications, %User{id: user_id} = user) do
+    manager? = Rice.Tasks.can_manage?(task, user)
+
     can_review_applications? =
-      task.status == "open" and task.creator_id == user_id and
+      task.status == "open" and manager? and
         Enum.any?(applications, &is_nil(&1.rejected_at))
 
     []
-    |> maybe_add(task.status == "draft" and task.creator_id == user_id, "publish")
+    |> maybe_add(task.status == "draft" and manager?, "publish")
     |> maybe_add(
       task.status == "open" and not past?(task.application_deadline) and
-        task.creator_id != user_id and
+        task.creator_id != user_id and not manager? and
         not Enum.any?(applications, &(&1.user_id == user_id)),
       "apply"
     )
     |> maybe_add(can_review_applications?, "appoint")
     |> maybe_add(can_review_applications?, "reject_application")
-    |> maybe_add(task.status in ["open", "draft"] and task.creator_id == user_id, "cancel")
+    |> maybe_add(task.status in ["open", "draft"] and manager?, "cancel")
     |> maybe_add(task.status == "in_progress" and task.assignee_id == user_id, "submit_result")
-    |> maybe_add(task.status == "under_review" and task.creator_id == user_id, "approve_result")
-    |> maybe_add(task.status == "under_review" and task.creator_id == user_id, "request_changes")
+    |> maybe_add(task.status == "under_review" and manager?, "approve_result")
+    |> maybe_add(task.status == "under_review" and manager?, "request_changes")
     |> Enum.reverse()
   end
 

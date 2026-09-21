@@ -8,16 +8,17 @@ defmodule Rice.TaskApplicationRejectionTest do
     publisher = task_publisher_fixture()
     rejected = user_fixture()
     selected = user_fixture()
-    {:ok, _} = Rice.Grains.grant(publisher, 100)
+    node = funded_node_fixture(publisher, 100)
 
     {:ok, task} =
       Tasks.create_task(publisher, %{
+        organizer_contact: "社区服务台",
         title: "筛选候选人",
         description: "保留其他候选",
         reward_amount: 60
       })
 
-    {:ok, application} = Tasks.apply(rejected, task, %{})
+    {:ok, application} = Tasks.apply(rejected, task, %{contact: "测试联系方式"})
     assert {:ok, result} = Tasks.reject_application(publisher, task, application.id)
     assert result.status == "open"
     assert result.reward_status == "reserved"
@@ -31,19 +32,19 @@ defmodule Rice.TaskApplicationRejectionTest do
     assert [%{reason: "task-application_rejected"}] = Rice.Inbox.list(rejected)
     assert {:error, :conflict} = Tasks.appoint(publisher, task, application.id)
 
-    assert {:ok, duplicate} = Tasks.apply(rejected, task, %{reason: "再试一次"})
+    assert {:ok, duplicate} = Tasks.apply(rejected, task, %{contact: "测试联系方式", reason: "再试一次"})
     assert duplicate.id == application.id
     assert duplicate.rejected_at == rejected_at
     assert Repo.aggregate(from(a in Application, where: a.task_id == ^task.id), :count) == 1
 
-    assert {:ok, other_application} = Tasks.apply(selected, task, %{})
+    assert {:ok, other_application} = Tasks.apply(selected, task, %{contact: "测试联系方式"})
     assert {:ok, appointed} = Tasks.appoint(publisher, task, other_application.id)
     assert appointed.assignee_id == selected.id
     assert [%{event: "application_rejected"}] = Tasks.list_notifications(rejected)
     assert [%{event: "assignee_appointed"}] = Tasks.list_notifications(selected)
 
     assert %{grain_balance: 40, grain_frozen_balance: 60} =
-             Repo.get!(Rice.Accounts.User, publisher.id)
+             Repo.get!(Rice.Community.Node, node.id)
 
     assert [%{kind: "reserved", amount: 60}] = Repo.all(Rice.Grains.Receipt)
     assert Rice.Grains.reconcile().ok?
@@ -54,8 +55,8 @@ defmodule Rice.TaskApplicationRejectionTest do
     worker = user_fixture()
     task = task_fixture(publisher)
     other_task = task_fixture(publisher)
-    {:ok, application} = Tasks.apply(worker, task, %{})
-    {:ok, other_application} = Tasks.apply(worker, other_task, %{})
+    {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
+    {:ok, other_application} = Tasks.apply(worker, other_task, %{contact: "测试联系方式"})
 
     assert {:error, :forbidden} = Tasks.reject_application(worker, task, application.id)
     assert {:error, :not_found} = Tasks.reject_application(publisher, task, other_application.id)
@@ -78,7 +79,7 @@ defmodule Rice.TaskApplicationRejectionTest do
     publisher = task_publisher_fixture()
     worker = user_fixture()
     task = task_fixture(publisher)
-    {:ok, application} = Tasks.apply(worker, task, %{})
+    {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
 
     task
     |> change(application_deadline: DateTime.add(DateTime.utc_now(), -60))

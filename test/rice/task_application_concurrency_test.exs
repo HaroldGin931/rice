@@ -15,16 +15,17 @@ defmodule Rice.TaskApplicationConcurrencyTest do
       ids = [publisher.id, worker.id]
 
       try do
-        {:ok, _} = Rice.Grains.grant(publisher, 100)
+        node = funded_node_fixture(publisher, 100)
 
         {:ok, task} =
           Tasks.create_task(publisher, %{
+            organizer_contact: "社区服务台",
             title: "并发拒绝",
             description: "候选处理",
             reward_amount: 20
           })
 
-        {:ok, application} = Tasks.apply(worker, task, %{})
+        {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
 
         results =
           race(supervisor, [
@@ -41,12 +42,13 @@ defmodule Rice.TaskApplicationConcurrencyTest do
 
         {:ok, competing} =
           Tasks.create_task(publisher, %{
+            organizer_contact: "社区服务台",
             title: "拒绝与任命竞争",
             description: "不允许已拒者被选定",
             reward_amount: 20
           })
 
-        {:ok, application} = Tasks.apply(worker, competing, %{})
+        {:ok, application} = Tasks.apply(worker, competing, %{contact: "测试联系方式"})
 
         outcomes =
           race(supervisor, [
@@ -76,12 +78,53 @@ defmodule Rice.TaskApplicationConcurrencyTest do
                ) == 1
 
         assert %{grain_balance: 60, grain_frozen_balance: 40} =
-                 Repo.get!(Rice.Accounts.User, publisher.id)
+                 Repo.get!(Rice.Community.Node, node.id)
 
         assert Repo.aggregate(
-                 from(r in Rice.Grains.Receipt, where: r.from_user_id == ^publisher.id),
+                 from(r in Rice.Grains.Receipt, where: r.from_node_id == ^node.id),
                  :count
                ) == 2
+
+        # The shared community account, not a creator's wallet, serializes spending.
+        reserves =
+          race(
+            supervisor,
+            for _ <- 1..2 do
+              uri = "rice://tasks/#{Rice.Tsid.generate()}"
+
+              fn ->
+                Repo.transaction(fn ->
+                  case Rice.Grains.reserve_business(Repo, {:node, node.id}, 40, uri) do
+                    {:ok, receipt} -> receipt
+                    {:error, reason} -> Repo.rollback(reason)
+                  end
+                end)
+              end
+            end
+          )
+
+        assert Enum.count(reserves, &match?({:ok, _}, &1)) == 1
+        assert Enum.count(reserves, &(&1 == {:error, :insufficient_balance})) == 1
+        {:ok, reserved} = Enum.find(reserves, &match?({:ok, _}, &1))
+
+        refunds =
+          race(
+            supervisor,
+            for _ <- 1..2 do
+              fn ->
+                Repo.transaction(fn ->
+                  Rice.Grains.refund_business(Repo, {:node, node.id}, 40, reserved.subject_uri)
+                end)
+              end
+            end
+          )
+
+        assert Enum.all?(refunds, &match?({:ok, {:ok, _}}, &1))
+
+        assert %{grain_balance: 60, grain_frozen_balance: 40} =
+                 Repo.get!(Rice.Community.Node, node.id)
+
+        assert Rice.Grains.reconcile().ok?
       after
         cleanup(ids)
       end
@@ -117,11 +160,16 @@ defmodule Rice.TaskApplicationConcurrencyTest do
   end
 
   defp cleanup(ids) do
+    node_ids = Repo.all(from(n in Rice.Community.Node, where: n.user_id in ^ids, select: n.id))
     task_ids = Repo.all(from(t in Rice.Tasks.Task, where: t.creator_id in ^ids, select: t.id))
     Repo.delete_all(from(n in Notification, where: n.recipient_id in ^ids or n.actor_id in ^ids))
 
     Repo.delete_all(
-      from(r in Rice.Grains.Receipt, where: r.from_user_id in ^ids or r.to_user_id in ^ids)
+      from(r in Rice.Grains.Receipt,
+        where:
+          r.from_user_id in ^ids or r.to_user_id in ^ids or r.from_node_id in ^node_ids or
+            r.to_node_id in ^node_ids
+      )
     )
 
     Repo.delete_all(

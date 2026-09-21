@@ -183,6 +183,7 @@ defmodule RiceWeb.Api.BusinessAttachmentsTest do
       node_id: node.id,
       title: "社区协作",
       description: "正文与图片",
+      organizer_contact: "社区服务台",
       status: status,
       client_request_id: "images-#{System.unique_integer([:positive])}"
     }

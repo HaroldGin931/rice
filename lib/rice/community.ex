@@ -8,6 +8,61 @@ defmodule Rice.Community do
 
   # ── 节点 ────────────────────────────────────────────────────────────────
 
+  def admin?(%Node{user_id: id}, %User{id: id}), do: true
+
+  def admin?(%Node{id: node_id}, %User{id: user_id}),
+    do:
+      Repo.exists?(
+        from m in Membership,
+          where: m.node_id == ^node_id and m.user_id == ^user_id and m.role == "admin"
+      )
+
+  def admin?(_node, _user), do: false
+
+  def managed_node_ids(%User{id: user_id}) do
+    memberships =
+      from m in Membership, where: m.user_id == ^user_id and m.role == "admin", select: m.node_id
+
+    Repo.all(
+      from n in Node, where: n.user_id == ^user_id or n.id in subquery(memberships), select: n.id
+    )
+  end
+
+  def managed_node_ids(_), do: []
+
+  def admin_ids(%Node{} = node) do
+    members =
+      Repo.all(
+        from m in Membership,
+          where: m.node_id == ^node.id and m.role == "admin",
+          select: m.user_id
+      )
+
+    Enum.uniq(Enum.reject([node.user_id | members], &is_nil/1))
+  end
+
+  def set_member_role(%User{} = user, %Node{} = node, user_id, role)
+      when role in ~w(admin member) do
+    if Rice.Tsid.valid?(user_id) do
+      Repo.transaction(fn ->
+        node = Repo.one!(from n in Node, where: n.id == ^node.id, lock: "FOR UPDATE")
+        if node.user_id != user.id or node.user_id == user_id, do: Repo.rollback(:forbidden)
+        member = Repo.get_by(Membership, node_id: node.id, user_id: user_id)
+        if is_nil(member), do: Repo.rollback(:not_found)
+
+        member
+        |> Ecto.Changeset.change(role: role)
+        |> Membership.changeset()
+        |> Repo.update()
+        |> write_result!()
+      end)
+    else
+      {:error, :not_found}
+    end
+  end
+
+  def set_member_role(_user, _node, _user_id, _role), do: {:error, :unprocessable_entity}
+
   @doc "公开目录附带本人身份；申请读取范围仅本人或本节点管理员。"
   def list_nodes(user \\ nil, params \\ %{}) do
     from(n in Node, order_by: [asc: n.position, asc: n.id])
@@ -33,9 +88,8 @@ defmodule Rice.Community do
 
     applications =
       if user do
-        from a in applications,
-          join: n in assoc(a, :node),
-          where: a.user_id == ^user.id or n.user_id == ^user.id
+        managed_ids = managed_node_ids(user)
+        from a in applications, where: a.user_id == ^user.id or a.node_id in ^managed_ids
       else
         from a in applications, where: false
       end
@@ -69,7 +123,8 @@ defmodule Rice.Community do
 
     case mine do
       "managed" ->
-        from n in query, where: n.user_id == ^user_id
+        ids = managed_node_ids(%User{id: user_id})
+        from n in query, where: n.id in ^ids
 
       "joined" ->
         from n in query, where: n.user_id == ^user_id or n.id in subquery(memberships)
@@ -118,16 +173,18 @@ defmodule Rice.Community do
       |> Repo.insert()
       |> write_result!()
 
-    Rice.Inbox.notify(
-      Repo,
-      node.user_id,
-      user.id,
-      "node_application_created",
-      "申请加入#{node.name}",
-      "node",
-      node.id
-    )
-    |> write_result!()
+    for admin_id <- admin_ids(node) do
+      Rice.Inbox.notify(
+        Repo,
+        admin_id,
+        user.id,
+        "node_application_created",
+        "申请加入#{node.name}",
+        "node",
+        node.id
+      )
+      |> write_result!()
+    end
 
     application
   end
@@ -137,7 +194,7 @@ defmodule Rice.Community do
     if Rice.Tsid.valid?(application_id) do
       Repo.transaction(fn ->
         node = Repo.one!(from n in Node, where: n.id == ^node.id, lock: "FOR UPDATE")
-        if node.user_id != user.id, do: Repo.rollback(:forbidden)
+        if not admin?(node, user), do: Repo.rollback(:forbidden)
 
         application = Repo.get_by(JoinApplication, id: application_id, node_id: node.id)
 

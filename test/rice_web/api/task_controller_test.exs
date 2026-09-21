@@ -14,7 +14,11 @@ defmodule RiceWeb.Api.TaskControllerTest do
              build_conn() |> get(~p"/api/tasks/#{task.id}") |> json_response(200)
 
     assert build_conn()
-           |> post(~p"/api/tasks", %{title: "未登录", description: "不能发布"})
+           |> post(~p"/api/tasks", %{
+             organizer_contact: "社区服务台",
+             title: "未登录",
+             description: "不能发布"
+           })
            |> json_response(401)
 
     {_user, token} = user_with_token()
@@ -22,6 +26,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
     assert build_conn()
            |> authed(token)
            |> post(~p"/api/tasks", %{
+             organizer_contact: "社区服务台",
              title: "普通用户任务",
              description: "不能发布",
              client_request_id: "ordinary-user"
@@ -33,7 +38,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
     publisher = task_publisher_fixture()
     worker = user_fixture()
     task = task_fixture(publisher)
-    assert {:ok, application} = Rice.Tasks.apply(worker, task, %{})
+    assert {:ok, application} = Rice.Tasks.apply(worker, task, %{contact: "测试联系方式"})
 
     assert %{"data" => []} =
              build_conn()
@@ -61,7 +66,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
     {worker, worker_token} = user_with_token()
     {other, other_token} = user_with_token()
     task = task_fixture(publisher)
-    {:ok, application} = Rice.Tasks.apply(worker, task, %{})
+    {:ok, application} = Rice.Tasks.apply(worker, task, %{contact: "测试联系方式"})
 
     initial =
       build_conn()
@@ -114,7 +119,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
            |> json_response(409)
 
     other_task = task_fixture(publisher)
-    {:ok, other_application} = Rice.Tasks.apply(other, other_task, %{})
+    {:ok, other_application} = Rice.Tasks.apply(other, other_task, %{contact: "测试联系方式"})
 
     assert build_conn()
            |> authed(publisher_token)
@@ -124,7 +129,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
     applied =
       build_conn()
       |> authed(other_token)
-      |> post(~p"/api/tasks/#{task.id}/applications", %{})
+      |> post(~p"/api/tasks/#{task.id}/applications", %{contact: "测试联系方式"})
       |> json_response(201)
 
     assert applied["data"]["my_application_status"] == "pending"
@@ -141,7 +146,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
 
   test "接口跑通申请、任命、提交、驳回与审核通过", %{conn: conn} do
     publisher = task_publisher_fixture()
-    {:ok, _} = Rice.Grains.grant(publisher, 100)
+    node = funded_node_fixture(publisher, 100)
     {:ok, publisher_token} = Rice.Accounts.issue_token(publisher)
     {worker, worker_token} = user_with_token()
 
@@ -149,6 +154,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
       conn
       |> authed(publisher_token)
       |> post(~p"/api/tasks", %{
+        organizer_contact: "社区服务台",
         title: "整理村史",
         description: "完成文字稿",
         client_request_id: "task-main-flow",
@@ -159,11 +165,12 @@ defmodule RiceWeb.Api.TaskControllerTest do
     task_id = created["data"]["id"]
     assert created["data"]["reward_amount"] == 60
     assert created["data"]["reward_status"] == "reserved"
+    assert created["data"]["funding_node_id"] == node.id
 
     applied =
       build_conn()
       |> authed(worker_token)
-      |> post(~p"/api/tasks/#{task_id}/applications", %{reason: "有经验"})
+      |> post(~p"/api/tasks/#{task_id}/applications", %{contact: "测试联系方式", reason: "有经验"})
       |> json_response(201)
 
     assert applied["data"]["my_application_status"] == "pending"
@@ -277,12 +284,12 @@ defmodule RiceWeb.Api.TaskControllerTest do
     {:ok, publisher_token} = Rice.Accounts.issue_token(publisher)
     {worker, worker_token} = user_with_token()
     task = task_fixture(publisher)
-    {:ok, application} = Rice.Tasks.apply(worker, task, %{})
+    {:ok, application} = Rice.Tasks.apply(worker, task, %{contact: "测试联系方式"})
     {:ok, _} = Rice.Tasks.appoint(publisher, task, application.id)
 
     assert conn
            |> authed(worker_token)
-           |> post(~p"/api/tasks/#{task.id}/applications", %{})
+           |> post(~p"/api/tasks/#{task.id}/applications", %{contact: "测试联系方式"})
            |> json_response(409)
 
     assert build_conn()
@@ -299,6 +306,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
       conn
       |> authed(token)
       |> post(~p"/api/tasks", %{
+        organizer_contact: "社区服务台",
         title: "任务草稿",
         description: "发布前不可见",
         client_request_id: "task-draft-flow",
@@ -358,7 +366,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
 
     assert build_conn()
            |> authed(worker_token)
-           |> post(~p"/api/tasks/#{task.id}/applications", %{})
+           |> post(~p"/api/tasks/#{task.id}/applications", %{contact: "测试联系方式"})
            |> json_response(201)
 
     assert build_conn()
@@ -381,9 +389,15 @@ defmodule RiceWeb.Api.TaskControllerTest do
 
   test "发布必须带请求标识，重复同一发布请求不会创建新任务或重复冻结" do
     publisher = task_publisher_fixture()
-    {:ok, _} = Rice.Grains.grant(publisher, 100)
+    node = funded_node_fixture(publisher, 100)
     {:ok, token} = Rice.Accounts.issue_token(publisher)
-    attrs = %{title: "网络重试的任务", description: "重试同一次发布", reward_amount: 60}
+
+    attrs = %{
+      organizer_contact: "社区服务台",
+      title: "网络重试的任务",
+      description: "重试同一次发布",
+      reward_amount: 60
+    }
 
     assert build_conn() |> authed(token) |> post(~p"/api/tasks", attrs) |> json_response(422)
     request = Map.put(attrs, :client_request_id, "publish-once")
@@ -393,7 +407,7 @@ defmodule RiceWeb.Api.TaskControllerTest do
     assert Rice.Repo.aggregate(Rice.Tasks.Task, :count) == 1
 
     assert %{grain_balance: 40, grain_frozen_balance: 60} =
-             Rice.Repo.get!(Rice.Accounts.User, publisher.id)
+             Rice.Repo.get!(Rice.Community.Node, node.id)
 
     assert Rice.Repo.aggregate(Rice.Grains.Receipt, :count) == 1
   end

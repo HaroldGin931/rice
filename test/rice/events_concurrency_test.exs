@@ -22,15 +22,15 @@ defmodule Rice.EventsConcurrencyTest do
 
         duplicates =
           race(supervisor, [
-            fn -> Events.apply(first, event, %{}) end,
-            fn -> Events.apply(first, event, %{}) end
+            fn -> Events.apply(first, event, %{contact: "测试联系方式"}) end,
+            fn -> Events.apply(first, event, %{contact: "测试联系方式"}) end
           ])
 
         assert Enum.all?(duplicates, &match?({:ok, _}, &1))
         assert Repo.aggregate(from(a in Application, where: a.event_id == ^event.id), :count) == 1
         assert balance(first).grain_frozen_balance == 20
 
-        {:ok, event} = Events.apply(second, event, %{})
+        {:ok, event} = Events.apply(second, event, %{contact: "测试联系方式"})
         [a, b] = event.applications
 
         approval =
@@ -77,14 +77,15 @@ defmodule Rice.EventsConcurrencyTest do
           ])
 
         assert Enum.all?(finishes, &match?({:ok, _}, &1))
-        assert balance(host).grain_balance == 20
+        assert balance(host).grain_balance == 0
+        assert Repo.get!(Rice.Community.Node, node.id).grain_balance == 20
         assert balance(first).grain_frozen_balance == 0
         assert balance(second).grain_frozen_balance == 0
         assert balance(first).grain_balance + balance(second).grain_balance == 180
 
         assert Repo.aggregate(
                  from(t in Rice.Grains.Transfer,
-                   where: t.to_user_id == ^host.id and t.kind == "event_fee"
+                   where: t.to_node_id == ^node.id and t.kind == "event_fee"
                  ),
                  :count
                ) == 1
@@ -93,7 +94,7 @@ defmodule Rice.EventsConcurrencyTest do
         before_balance = balance(first).grain_balance
 
         competing = event!(host, node)
-        {:ok, competing} = Events.apply(first, competing, %{})
+        {:ok, competing} = Events.apply(first, competing, %{contact: "测试联系方式"})
         application = hd(competing.applications)
         {:ok, competing} = Events.approve_application(host, competing, application.id)
         now = DateTime.utc_now()
@@ -150,7 +151,7 @@ defmodule Rice.EventsConcurrencyTest do
         node = node_fixture(%{user_id: host.id})
         {:ok, _} = Rice.Grains.grant(applicant, 100)
         event = event!(host, node)
-        {:ok, event} = Events.apply(applicant, event, %{})
+        {:ok, event} = Events.apply(applicant, event, %{contact: "测试联系方式"})
         own = hd(event.applications)
 
         repeated =
@@ -180,7 +181,7 @@ defmodule Rice.EventsConcurrencyTest do
                ) == 1
 
         event = event!(host, node)
-        {:ok, event} = Events.apply(applicant, event, %{})
+        {:ok, event} = Events.apply(applicant, event, %{contact: "测试联系方式"})
         own = hd(event.applications)
 
         competing =
@@ -214,6 +215,7 @@ defmodule Rice.EventsConcurrencyTest do
 
     {:ok, event} =
       Events.create_event(host, %{
+        organizer_contact: "社区服务台",
         node_id: node.id,
         title: "并发活动",
         description: "独立数据库连接",

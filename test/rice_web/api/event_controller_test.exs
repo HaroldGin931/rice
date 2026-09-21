@@ -11,6 +11,7 @@ defmodule RiceWeb.Api.EventControllerTest do
     now = DateTime.utc_now()
 
     attrs = %{
+      organizer_contact: "社区服务台",
       node_id: node.id,
       title: "公共客厅修理",
       description: "一起修好木凳",
@@ -38,7 +39,7 @@ defmodule RiceWeb.Api.EventControllerTest do
     first_result =
       build_conn()
       |> authed(first_token)
-      |> post(~p"/api/events/#{id}/applications", %{reason: "第一位的私人申请"})
+      |> post(~p"/api/events/#{id}/applications", %{contact: "测试联系方式", reason: "第一位的私人申请"})
       |> json_response(200)
 
     a_id = first_result["data"]["my_application"]["id"]
@@ -47,7 +48,7 @@ defmodule RiceWeb.Api.EventControllerTest do
     second_result =
       build_conn()
       |> authed(second_token)
-      |> post(~p"/api/events/#{id}/applications", %{reason: "第二位的私人申请"})
+      |> post(~p"/api/events/#{id}/applications", %{contact: "测试联系方式", reason: "第二位的私人申请"})
       |> json_response(200)
 
     b_id = second_result["data"]["my_application"]["id"]
@@ -116,6 +117,7 @@ defmodule RiceWeb.Api.EventControllerTest do
 
     {:ok, event} =
       Events.create_event(host, %{
+        organizer_contact: "社区服务台",
         node_id: node.id,
         title: "撤销申请API验收",
         client_request_id: "withdraw-api-#{System.unique_integer([:positive])}",
@@ -131,7 +133,7 @@ defmodule RiceWeb.Api.EventControllerTest do
     applied =
       build_conn()
       |> authed(applicant_token)
-      |> post(~p"/api/events/#{event.id}/applications", %{reason: "私人申请理由"})
+      |> post(~p"/api/events/#{event.id}/applications", %{contact: "测试联系方式", reason: "私人申请理由"})
       |> json_response(200)
 
     own = applied["data"]["my_application"]
@@ -169,6 +171,7 @@ defmodule RiceWeb.Api.EventControllerTest do
     now = DateTime.utc_now()
 
     attrs = %{
+      organizer_contact: "社区服务台",
       node_id: node.id,
       title: "草稿",
       description: "描述",

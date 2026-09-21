@@ -1,5 +1,5 @@
 defmodule Rice.Tasks.Task do
-  @moduledoc "任务主体；奖励由发布者余额冻结，并在结果认可后发放。"
+  @moduledoc "任务主体；新奖励由社区账户冻结，旧任务保留原个人出资账户。"
   use Rice.Schema
 
   @statuses ~w(draft open in_progress under_review completed expired cancelled)
@@ -7,12 +7,14 @@ defmodule Rice.Tasks.Task do
   schema "tasks" do
     field(:title, :string)
     field(:description, :string)
+    field(:organizer_contact, :string)
     field(:status, :string, default: "open")
     field(:application_deadline, :utc_datetime_usec)
     field(:execution_deadline, :utc_datetime_usec)
     field(:requirement, :string, default: "")
     field(:client_request_id, :string)
     belongs_to(:node, Rice.Community.Node)
+    belongs_to(:funding_node, Rice.Community.Node)
     field(:appointed_at, :utc_datetime_usec)
     field(:appointment_reason, :string)
     field(:reward_amount, :integer, default: 0)
@@ -35,6 +37,7 @@ defmodule Rice.Tasks.Task do
     |> cast(attrs, [
       :title,
       :description,
+      :organizer_contact,
       :requirement,
       :application_deadline,
       :execution_deadline,
@@ -44,6 +47,9 @@ defmodule Rice.Tasks.Task do
     |> validate_required([:title, :description])
     |> update_change(:title, &trim/1)
     |> update_change(:description, &trim/1)
+    |> update_change(:organizer_contact, &trim/1)
+    |> validate_length(:organizer_contact, max: 256)
+    |> validate_organizer_contact()
     |> validate_length(:title, min: 1, max: 128)
     |> validate_length(:description, min: 1, max: 4000)
     |> validate_number(:reward_amount, greater_than_or_equal_to: 0)
@@ -66,8 +72,15 @@ defmodule Rice.Tasks.Task do
   def publish_changeset(task) do
     task
     |> change()
+    |> validate_required([:organizer_contact])
     |> validate_future_deadline()
     |> validate_execution_deadline()
+  end
+
+  defp validate_organizer_contact(changeset) do
+    if get_field(changeset, :status) == "draft",
+      do: changeset,
+      else: validate_required(changeset, [:organizer_contact])
   end
 
   defp validate_execution_deadline(changeset) do

@@ -240,6 +240,9 @@ defmodule RiceWeb.Router do
     get "/notifications", InboxController, :index
     post "/notifications/read", InboxController, :read
     post "/nodes/:node_id/applications", NodeController, :apply
+    patch "/nodes/:node_id/members/:user_id", NodeController, :update_member
+    get "/nodes/:node_id/wallet", NodeWalletController, :show
+    post "/nodes/:node_id/fund", NodeWalletController, :fund
     post "/nodes/:node_id/applications/:application_id/approve", NodeController, :approve
     post "/nodes/:node_id/applications/:application_id/reject", NodeController, :reject
     post "/events", EventController, :create
