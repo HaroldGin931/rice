@@ -76,6 +76,30 @@ defmodule RiceWeb.Api.EventControllerTest do
 
     assert approved["data"]["approved_count"] == 1
 
+    {late, late_token} = user_with_token()
+    {:ok, _} = Rice.Grains.grant(late, 100)
+    full = build_conn() |> authed(late_token) |> get(~p"/api/events/#{id}") |> json_response(200)
+    refute "apply" in full["data"]["allowed_actions"]
+
+    listed = build_conn() |> authed(late_token) |> get(~p"/api/events") |> json_response(200)
+    refute "apply" in hd(listed["data"])["allowed_actions"]
+
+    denied =
+      build_conn()
+      |> authed(late_token)
+      |> post(~p"/api/events/#{id}/applications", %{contact: "测试联系方式"})
+      |> json_response(409)
+
+    assert denied["errors"]["detail"] == "活动已满，暂无可用名额"
+    assert Repo.get!(Rice.Accounts.User, late.id).grain_balance == 100
+    assert Repo.get!(Rice.Accounts.User, late.id).grain_frozen_balance == 0
+    refute Repo.get_by(Rice.Events.Application, event_id: id, user_id: late.id)
+
+    pending =
+      build_conn() |> authed(second_token) |> get(~p"/api/events/#{id}") |> json_response(200)
+
+    assert pending["data"]["my_application"]["allowed_actions"] == ["withdraw"]
+
     assert %{"data" => [%{"id" => ^id}]} =
              build_conn()
              |> get("/api/events", %{participant_did: first.did})

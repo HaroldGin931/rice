@@ -225,6 +225,8 @@ defmodule Rice.Events do
             before?(now, current.starts_at)
         )
 
+        require_capacity!(current)
+
         application =
           unwrap!(
             Repo.insert(
@@ -292,13 +294,7 @@ defmodule Rice.Events do
         require!(application.status == if(target == "removed", do: "approved", else: "pending"))
 
         if target == "approved" do
-          count =
-            Repo.aggregate(
-              from(a in Application, where: a.event_id == ^current.id and a.status == "approved"),
-              :count
-            )
-
-          require!(count < current.capacity, :capacity_full)
+          require_capacity!(current)
           unwrap!(Repo.update(Changeset.change(application, status: "approved")))
 
           record!(
@@ -430,7 +426,8 @@ defmodule Rice.Events do
        host? and event.status in ["open", "in_progress"] and not before?(now, event.ends_at)},
       {"apply",
        not host? and event.creator_id != user.id and is_nil(own) and event.status == "open" and
-         before?(now, event.application_deadline) and before?(now, event.starts_at)}
+         before?(now, event.application_deadline) and before?(now, event.starts_at) and
+         Enum.count(event.applications, &(&1.status == "approved")) < event.capacity}
     ]
     |> Enum.filter(&elem(&1, 1))
     |> Enum.map(&elem(&1, 0))
@@ -546,6 +543,17 @@ defmodule Rice.Events do
   defp application!(event, id) do
     require!(Rice.Tsid.valid?(id), :not_found)
     Repo.get_by(Application, id: id, event_id: event.id) || Repo.rollback(:not_found)
+  end
+
+  # Called only inside with_event's row lock, before creating an application or freezing its fee.
+  defp require_capacity!(event) do
+    count =
+      Repo.aggregate(
+        from(a in Application, where: a.event_id == ^event.id and a.status == "approved"),
+        :count
+      )
+
+    require!(count < event.capacity, :capacity_full)
   end
 
   defp with_event(id, fun) do

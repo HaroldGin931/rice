@@ -31,7 +31,7 @@ defmodule Rice.EventsTest do
     assert {:error, :not_found} = Events.fetch_event("not-an-id")
   end
 
-  test "所有候选均可申请，冻结不占名额，通过时才检查容量", ctx do
+  test "有空位时允许多个候选申请，冻结不占名额，通过才占位", ctx do
     event = event!(ctx)
     assert {:ok, one} = Events.apply(ctx.first, event, %{contact: "测试联系方式", reason: "私人申请资料"})
     assert {:ok, two} = Events.apply(ctx.second, event, %{contact: "测试联系方式"})
@@ -49,6 +49,37 @@ defmodule Rice.EventsTest do
     assert {:ok, _} = Events.approve_application(ctx.host, event, a.id)
     assert Repo.get!(Application, b.id).status == "pending"
     assert Rice.Grains.reconcile().ok?
+  end
+
+  test "收费和免费活动满员后拒绝新申请，释放名额后才恢复", ctx do
+    for fee <- [1, 0] do
+      event = event!(ctx, %{fee_amount: fee})
+      {:ok, applied} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
+      first = application(applied, ctx.first)
+      {:ok, full} = Events.approve_application(ctx.host, event, first.id)
+      refute "apply" in Events.allowed_actions(full, ctx.second)
+      before = {Repo.aggregate(EventHistory, :count), Repo.aggregate(Rice.Grains.Receipt, :count)}
+
+      # A stale detail object must not bypass the current capacity check.
+      assert {:error, :capacity_full} =
+               Events.apply(ctx.second, event, %{contact: "测试联系方式"})
+
+      refute Repo.get_by(Application, event_id: event.id, user_id: ctx.second.id)
+      assert balances(ctx.second) == {100, 0}
+
+      assert before ==
+               {Repo.aggregate(EventHistory, :count), Repo.aggregate(Rice.Grains.Receipt, :count)}
+
+      assert {:ok, repeat} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
+      assert application(repeat, ctx.first).id == first.id
+      assert balances(ctx.first) == {100 - fee, fee}
+      {:ok, reopened} = Events.remove_application(ctx.host, full, first.id)
+      assert "apply" in Events.allowed_actions(reopened, ctx.second)
+      assert {:ok, _} = Events.apply(ctx.second, reopened, %{contact: "测试联系方式"})
+      assert balances(ctx.second) == {100 - fee, fee}
+      assert {:ok, _} = Events.cancel(ctx.host, reopened)
+      assert Rice.Grains.reconcile().ok?
+    end
   end
 
   test "余额不足不会产生申请、冻结和进展的半成功记录", ctx do

@@ -11,13 +11,13 @@ defmodule Rice.EventsConcurrencyTest do
 
     # Separate committed connections exercise real row locks, not a shared sandbox connection.
     Sandbox.unboxed_run(Repo, fn ->
-      users = for _ <- 1..3, do: user_fixture()
-      [host, first, second] = users
+      users = for _ <- 1..4, do: user_fixture()
+      [host, first, second, late] = users
       ids = Enum.map(users, & &1.id)
 
       try do
         node = node_fixture(%{user_id: host.id})
-        for user <- [first, second], do: Rice.Grains.grant(user, 100)
+        for user <- [first, second, late], do: Rice.Grains.grant(user, 100)
         event = event!(host, node)
 
         duplicates =
@@ -46,6 +46,18 @@ defmodule Rice.EventsConcurrencyTest do
                  from(a in Application, where: a.event_id == ^event.id and a.status == "approved"),
                  :count
                ) == 1
+
+        late_applications =
+          race(supervisor, [
+            fn -> Events.apply(late, event, %{contact: "测试联系方式"}) end,
+            fn -> Events.apply(late, event, %{contact: "测试联系方式"}) end
+          ])
+
+        assert late_applications == [{:error, :capacity_full}, {:error, :capacity_full}]
+        refute Repo.get_by(Application, event_id: event.id, user_id: late.id)
+        assert balance(late).grain_balance == 100
+        assert balance(late).grain_frozen_balance == 0
+        refute Repo.exists?(from r in Rice.Grains.Receipt, where: r.from_user_id == ^late.id)
 
         now = DateTime.utc_now()
 
