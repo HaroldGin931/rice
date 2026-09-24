@@ -27,8 +27,8 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| `kind` | `grant`(后台发放)/ `reward`(赞赏内容)/ `gift`(转赠)/ `task_reward`(任务完成奖励) |
-| `subject_uri` | 赞赏时是贴文 AT URI；任务奖励是 `rice://tasks/:id`；其余为 `null` |
+| `kind` | `grant`(后台发放)/ `reward`(打赏内容)/ `gift`(转赠)/ `task_reward`(任务完成奖励) |
+| `subject_uri` | 打赏时是贴文 AT URI；任务奖励是 `rice://tasks/:id`；其余为 `null` |
 | `direction` | 相对**当前用户**:收到是 `in`,付出是 `out` |
 | `from` | 发放没有付款人,是 `null` |
 
@@ -64,7 +64,7 @@
 | `amount` | integer | 是 | 正整数。字符串数字也收 |
 | `kind` | string | 否 | `reward` 或 `gift`(默认) |
 | `memo` | string | 否 | 留言 |
-| `subject_uri` | string | 否 | 赞赏时指向的贴文 AT URI |
+| `subject_uri` | string | 否 | 打赏时指向的贴文 AT URI |
 
 `kind` 只认 `reward`,其余一律当 `gift` —— 客户端传不出 `grant`,
 也传不出 `task_reward`。发放只能从后台走，任务奖励只能由 Task 状态机结算。
