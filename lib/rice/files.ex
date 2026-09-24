@@ -100,7 +100,7 @@ defmodule Rice.Files do
     end
   end
 
-  @doc "按提交顺序替换业务图片；省略字段保留，空数组移除，最多四张。"
+  @doc "按提交顺序替换业务图片；省略字段保留，空数组移除，最多九张。"
   def put_images(changeset, attrs, user_id) do
     ids = Map.fetch(attrs, "attachment_ids")
     ids = if ids == :error, do: Map.fetch(attrs, :attachment_ids), else: ids
@@ -111,7 +111,7 @@ defmodule Rice.Files do
 
       {:ok, ids} ->
         valid? =
-          is_list(ids) and length(ids) <= 4 and Enum.all?(ids, &Rice.Tsid.valid?/1) and
+          is_list(ids) and length(ids) <= 9 and Enum.all?(ids, &Rice.Tsid.valid?/1) and
             length(Enum.uniq(ids)) == length(ids)
 
         if valid? and owned_images?(ids, user_id) do
@@ -128,7 +128,7 @@ defmodule Rice.Files do
 
           Ecto.Changeset.put_assoc(%{changeset | data: data}, :image_links, links)
         else
-          Ecto.Changeset.add_error(changeset, :attachment_ids, "最多选择4张本人上传的有效图片，不能重复")
+          Ecto.Changeset.add_error(changeset, :attachment_ids, "最多选择9张本人上传的有效图片，不能重复")
         end
     end
   end

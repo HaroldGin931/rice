@@ -44,7 +44,7 @@
 `application_count/approved_count`、`my_application/applications`、`history/allowed_actions`。
 列表放在 `data` 数组并提供 `meta.next_cursor`，详情放在 `data` 对象。
 
-正文图片由 `attachment_ids` 按顺序指定，最多 4 张本人上传的图片；省略保留，`[]` 移除。
+正文图片由 `attachment_ids` 按顺序指定，最多 9 张本人上传的图片；省略保留，`[]` 移除。
 列表与详情均返回有序 `attachments`，每项含 `id/kind/filename/content_type/byte_size/url`。
 完整校验及访问规则见 [正文图片](attachment_controller.md#任务与活动正文图片)。
 

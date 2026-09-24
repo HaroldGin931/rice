@@ -75,7 +75,7 @@ Task V1 与稻米奖励结算。读取与结算权威都是 Rice 数据库，不
 对象另外返回 `node`、`requirement`、`execution_deadline`、`application_closed`、`overdue`，
 以及当前用户的 `my_application`（含本人理由与状态）。`appointment_reason` 只返回给发布者和承接者。
 
-正文图片由创建/草稿编辑请求的 `attachment_ids` 指定，最多 4 张、按数组顺序；列表和详情
+正文图片由创建/草稿编辑请求的 `attachment_ids` 指定，最多 9 张、按数组顺序；列表和详情
 均返回有序 `attachments`。上传归属、替换/移除及 URL 规则见 [正文图片](attachment_controller.md#任务与活动正文图片)。
 
 `published_at` 取任务第一次进入 `open` 的状态事件时间；草稿为 `null`。`inserted_at`

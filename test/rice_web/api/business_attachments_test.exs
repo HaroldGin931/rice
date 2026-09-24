@@ -25,7 +25,8 @@ defmodule RiceWeb.Api.BusinessAttachmentsTest do
       node = node_fixture(%{user_id: host.id})
       first = upload(token)
       second = upload(token)
-      ids = [second["id"], first["id"]]
+      extra = for _ <- 1..7, do: upload(token)
+      ids = [second["id"], first["id"] | Enum.map(extra, & &1["id"])]
       attrs = attrs(@resource, node, "draft") |> Map.put(:attachment_ids, ids)
       created = create(@resource, token, attrs)
       id = created["id"]
@@ -67,14 +68,14 @@ defmodule RiceWeb.Api.BusinessAttachmentsTest do
              |> json_response(409)
     end
 
-    test "#{resource} 拒绝他人、非图片、无文件、无效、重复及超过四张的附件且保存原子化" do
+    test "#{resource} 拒绝他人、非图片、无文件、无效、重复及超过九张的附件且保存原子化" do
       {host, token} = user_with_token()
       {_other, other_token} = user_with_token()
       node = node_fixture(%{user_id: host.id})
       image = upload(token)
       foreign = upload(other_token)
       document = upload(token, "file")
-      extra = for _ <- 1..4, do: upload(token)
+      extra = for _ <- 1..9, do: upload(token)
 
       unstored =
         Repo.insert!(%Attachment{kind: "image", filename: "missing.png", user_id: host.id})

@@ -257,7 +257,7 @@ defmodule Rice.Grains do
                 to_node_id: node.id,
                 amount: amount,
                 subject_uri: uri,
-                memo: "转入社区稻米"
+                memo: "转入节点稻米"
               }
 
               with {:ok, transfer} <- Repo.insert(Transfer.changeset(%Transfer{}, attrs)),

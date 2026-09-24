@@ -84,7 +84,7 @@ core 的 `/api/v1/file/upload` 标着 `AllowAnonymous` —— **任何人都能�
 {"description":"一起整理公共客厅", "attachment_ids":["图片一的 TSID", "图片二的 TSID"]}
 ```
 
-- `attachment_ids` 可选，最多 **4** 张，不能重复；每个 ID 必须存在、已有存储内容、
+- `attachment_ids` 可选，最多 **9** 张，不能重复；每个 ID 必须存在、已有存储内容、
   `kind=image` 且属于当前发布者。无效列表返回 `422`，错误字段为 `attachment_ids`。
 - 省略字段时保留原图；`[]` 移除全部；非空数组整体替换顺序和选择。正文与关联同事务保存。
 - 只可修改草稿。草稿发布及直接发布均保留图片顺序；原有无图片调用继续有效。
