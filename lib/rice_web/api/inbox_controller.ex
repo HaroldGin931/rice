@@ -1,6 +1,6 @@
 defmodule RiceWeb.Api.InboxController do
   use RiceWeb, :controller
-  def index(conn, _), do: json(conn, %{notifications: Rice.Inbox.list(conn.assigns.current_user)})
+  def index(conn, params), do: json(conn, Rice.Inbox.list_page(conn.assigns.current_user, params))
 
   def read(conn, _) do
     Rice.Inbox.mark_read(conn.assigns.current_user)

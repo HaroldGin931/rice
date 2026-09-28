@@ -361,7 +361,8 @@ defmodule Rice.Grains do
     if count == 1, do: {:ok, count}, else: {:error, :recipient_not_found}
   end
 
-  defp resolve_recipient(%User{} = user), do: {:ok, user}
+  @doc "解析转账收款人，不扣款或创建流水；联系方式查询只供认证后的转账流程使用。"
+  def resolve_recipient(%User{} = user), do: {:ok, user}
 
   # 收款方可以用 rice 的 id、DID、handle、邮箱或手机号指定 —— 转账界面只有
   # 一个输入框,用户填什么都得认。不能把这些塞进一条 or:id 是
@@ -370,7 +371,7 @@ defmodule Rice.Grains do
   # 注意这里确实能区分「联系方式存在 / 不存在」(找不到会报
   # recipient_not_found)。core 也是如此,而且转账本身必须给出这个反馈 ——
   # 想收敛枚举风险要靠接口限流,不是靠把错误信息含糊掉。
-  defp resolve_recipient(identifier) when is_binary(identifier) do
+  def resolve_recipient(identifier) when is_binary(identifier) do
     identifier = String.trim(identifier)
 
     user =
@@ -384,7 +385,7 @@ defmodule Rice.Grains do
     end
   end
 
-  defp resolve_recipient(_), do: {:error, :recipient_not_found}
+  def resolve_recipient(_), do: {:error, :recipient_not_found}
 
   defp find_by_id(identifier) do
     if Rice.Tsid.valid?(identifier) do
@@ -417,7 +418,14 @@ defmodule Rice.Grains do
         )
 
       Regex.match?(~r/^\d{5,20}$/, identifier) ->
-        Repo.one(from u in User, where: is_nil(u.deleted_at) and u.phone == ^identifier)
+        case Repo.all(
+               from u in User,
+                 where: is_nil(u.deleted_at) and u.phone == ^identifier,
+                 limit: 2
+             ) do
+          [user] -> user
+          _ -> nil
+        end
 
       true ->
         nil

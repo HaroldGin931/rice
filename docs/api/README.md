@@ -17,6 +17,7 @@
 | [password](password_controller.md) | `PasswordController` | 忘记密码 |
 | [user](user_controller.md) | `UserController` | 公开用户搜索与资料、自己的档案、改绑、注销 |
 | [attachment](attachment_controller.md) | `AttachmentController` | 附件上传与读取 |
+| [legacy attachment](legacy_attachment_controller.md) | `LegacyAttachmentController` | 历史正文图片的只读地址兼容 |
 | [app](app_controller.md) | `AppController` | 应用入口 |
 | [banner](banner_controller.md) | `BannerController` | 轮播位 |
 | [announcement](announcement_controller.md) | `AnnouncementController` | 公告 |

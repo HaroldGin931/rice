@@ -33,12 +33,8 @@ defmodule RiceWeb.Api.TaskController do
     end
   end
 
-  def update(conn, %{"task_id" => task_id} = params) do
-    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
-         {:ok, task} <- Tasks.update_draft(conn.assigns.current_user, task, params) do
-      render(conn, :show, task: task, current_user: conn.assigns.current_user)
-    end
-  end
+  def update(conn, %{"task_id" => task_id} = params),
+    do: change(conn, task_id, &Tasks.update_draft(&1, &2, params))
 
   def apply(conn, %{"task_id" => task_id} = params) do
     with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
@@ -50,27 +46,12 @@ defmodule RiceWeb.Api.TaskController do
     end
   end
 
-  def publish(conn, %{"task_id" => task_id}) do
-    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
-         {:ok, task} <- Tasks.publish_draft(conn.assigns.current_user, task) do
-      render(conn, :show, task: task, current_user: conn.assigns.current_user)
-    end
-  end
+  def publish(conn, %{"task_id" => task_id}), do: change(conn, task_id, &Tasks.publish_draft/2)
 
-  def cancel(conn, %{"task_id" => task_id}) do
-    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
-         {:ok, task} <- Tasks.cancel(conn.assigns.current_user, task) do
-      render(conn, :show, task: task, current_user: conn.assigns.current_user)
-    end
-  end
+  def cancel(conn, %{"task_id" => task_id}), do: change(conn, task_id, &Tasks.cancel/2)
 
-  def appoint(conn, %{"task_id" => task_id, "application_id" => application_id}) do
-    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
-         {:ok, task} <-
-           Tasks.appoint(conn.assigns.current_user, task, application_id, conn.params) do
-      render(conn, :show, task: task, current_user: conn.assigns.current_user)
-    end
-  end
+  def appoint(conn, %{"task_id" => task_id, "application_id" => application_id}),
+    do: change(conn, task_id, &Tasks.appoint(&1, &2, application_id, conn.params))
 
   def submit(conn, %{"task_id" => task_id} = params) do
     with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
@@ -81,35 +62,29 @@ defmodule RiceWeb.Api.TaskController do
     end
   end
 
-  def reject_application(conn, %{"task_id" => task_id, "application_id" => application_id}) do
-    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
-         {:ok, task} <-
-           Tasks.reject_application(conn.assigns.current_user, task, application_id) do
-      render(conn, :show, task: task, current_user: conn.assigns.current_user)
-    end
-  end
+  def reject_application(conn, %{"task_id" => task_id, "application_id" => application_id}),
+    do: change(conn, task_id, &Tasks.reject_application(&1, &2, application_id))
 
-  def approve(conn, %{"task_id" => task_id, "submission_id" => submission_id}) do
-    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
-         {:ok, task} <- Tasks.approve_result(conn.assigns.current_user, task, submission_id) do
-      render(conn, :show, task: task, current_user: conn.assigns.current_user)
-    end
-  end
+  def approve(conn, %{"task_id" => task_id, "submission_id" => submission_id}),
+    do: change(conn, task_id, &Tasks.approve_result(&1, &2, submission_id))
 
   def request_changes(
         conn,
         %{"task_id" => task_id, "submission_id" => submission_id} = params
-      ) do
-    with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),
-         {:ok, task} <-
-           Tasks.request_changes(
-             conn.assigns.current_user,
-             task,
-             submission_id,
-             params["reason"] || ""
-           ) do
-      render(conn, :show, task: task, current_user: conn.assigns.current_user)
-    end
+      ),
+      do:
+        change(
+          conn,
+          task_id,
+          &Tasks.request_changes(&1, &2, submission_id, params["reason"] || "")
+        )
+
+  defp change(conn, task_id, action) do
+    user = conn.assigns.current_user
+
+    with {:ok, task} <- Tasks.fetch_task(task_id, user),
+         {:ok, task} <- action.(user, task),
+         do: render(conn, :show, task: task, current_user: user)
   end
 
   def notifications(conn, _params) do

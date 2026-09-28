@@ -1,7 +1,7 @@
 defmodule Rice.Inbox do
   @moduledoc "Task, activity and membership messages share the existing private inbox."
   import Ecto.Query
-  alias Rice.{Repo, Tasks.Notification}
+  alias Rice.{Pagination, Repo, Tasks.Notification}
 
   def notify(repo, recipient_id, actor_id, event, detail, type, id) do
     %Notification{}
@@ -16,35 +16,53 @@ defmodule Rice.Inbox do
     |> repo.insert()
   end
 
-  def list(user) do
-    Repo.all(
-      from n in Notification,
-        left_join: event in Rice.Events.Event,
-        on: n.subject_type == "event" and n.subject_id == event.id,
-        where: n.recipient_id == ^user.id,
-        order_by: [desc: n.id],
-        limit: 100,
-        select: {n, event},
-        preload: [actor: :avatar, task: []]
-    )
-    |> Enum.map(fn {n, event} ->
-      type = n.subject_type || "task"
-      subject = event || n.task
-      title = if subject, do: subject.title
-      detail = notification_detail(n, event)
+  def list(user), do: list_page(user, %{}).notifications
 
-      %{
-        uri: "business-notification:#{n.id}",
-        reason: "task-#{n.event}",
-        record: %{text: Enum.join(Enum.reject([title, detail], &is_nil/1), " · ")},
-        isRead: not is_nil(n.read_at),
-        indexedAt: n.inserted_at,
-        author: %{handle: n.actor.handle, displayName: n.actor.nickname},
-        taskId: n.task_id,
-        subjectType: type,
-        subjectId: n.subject_id || n.task_id
-      }
-    end)
+  def list_page(user, params) do
+    %{limit: limit, before: before} =
+      params
+      |> Map.take(["limit", "before"])
+      |> Map.put_new("limit", 100)
+      |> Pagination.params()
+
+    query = from n in Notification, where: n.recipient_id == ^user.id
+    query = if before, do: from(n in query, where: n.id < ^before), else: query
+
+    {page, more} =
+      Repo.all(
+        from n in query,
+          left_join: event in Rice.Events.Event,
+          on: n.subject_type == "event" and n.subject_id == event.id,
+          order_by: [desc: n.id],
+          limit: ^(limit + 1),
+          select: {n, event},
+          preload: [actor: :avatar, task: []]
+      )
+      |> Enum.split(limit)
+
+    %{
+      notifications: Enum.map(page, fn {n, event} -> format_notification(n, event) end),
+      cursor: if(more == [], do: nil, else: elem(List.last(page), 0).id)
+    }
+  end
+
+  defp format_notification(n, event) do
+    type = n.subject_type || "task"
+    subject = event || n.task
+    title = if subject, do: subject.title
+    detail = notification_detail(n, event)
+
+    %{
+      uri: "business-notification:#{n.id}",
+      reason: "task-#{n.event}",
+      record: %{text: Enum.join(Enum.reject([title, detail], &is_nil/1), " · ")},
+      isRead: not is_nil(n.read_at),
+      indexedAt: n.inserted_at,
+      author: %{handle: n.actor.handle, displayName: n.actor.nickname},
+      taskId: n.task_id,
+      subjectType: type,
+      subjectId: n.subject_id || n.task_id
+    }
   end
 
   # Published fees are immutable, so existing notifications can gain context without rewriting them.

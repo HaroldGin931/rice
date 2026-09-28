@@ -75,6 +75,7 @@ defmodule RiceWeb.Router do
 
     # 期 2:附件读取(公开)。上传在下面的认证段里。
     get "/attachments/:id", AttachmentController, :show
+    get "/v1/file/download", LegacyAttachmentController, :show
 
     # 期 3:注册 / 登录。这几个必须匿名可用。
     post "/verification_codes", VerificationCodeController, :create
@@ -230,6 +231,7 @@ defmodule RiceWeb.Router do
 
     # 期 4:稻米。明细只能看自己的,转账当然要登录。
     get "/grain_transfers", GrainTransferController, :index
+    post "/grain_transfers/recipient", GrainTransferController, :recipient
     post "/grain_transfers", GrainTransferController, :create
 
     # 期 5:提案的写操作

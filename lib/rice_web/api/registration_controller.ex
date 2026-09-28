@@ -38,17 +38,16 @@ defmodule RiceWeb.Api.RegistrationController do
     end
   end
 
-  @doc "第二步:凭票 + 公开昵称 + 密码完成注册,账号标识由服务端分配。"
+  @doc "第二步:凭票 + 用户名前缀 + 密码完成注册,完整账号标识由服务端拼接。"
   def create(conn, params) do
     with {:ok, contact} <- verify_ticket(params["ticket"]),
-         {:ok, nickname} <- fetch_nickname(params),
+         {:ok, username} <- fetch_username(params),
          {:ok, password} <- fetch_password(params) do
       attrs =
         contact
         |> atomize()
         |> Map.merge(%{
-          handle: registration_handle(params["ticket"]),
-          nickname: nickname,
+          handle: "#{username}.#{Rice.PDS.Api.impl().handle_domain()}",
           password: password
         })
 
@@ -67,8 +66,8 @@ defmodule RiceWeb.Api.RegistrationController do
         {:error, %Ecto.Changeset{} = changeset} ->
           {:error, changeset}
 
-        {:error, _} ->
-          conn |> put_status(:bad_gateway) |> json(%{errors: %{detail: "创建账号失败"}})
+        {:error, reason} ->
+          registration_error(conn, reason)
       end
     end
   end
@@ -82,19 +81,36 @@ defmodule RiceWeb.Api.RegistrationController do
 
   defp verify_ticket(_), do: {:error, :invalid_ticket}
 
-  # 同一张已验签的票重试时保持同一账号标识;不把手机号或邮箱放进公开 handle。
-  # PDS 服务子域前缀最多 18 字符;u + 16 位十六进制共 17 字符。
-  defp registration_handle(ticket) do
-    suffix = :crypto.hash(:sha256, ticket) |> binary_part(0, 8) |> Base.encode16(case: :lower)
-    "u#{suffix}.#{Rice.PDS.Api.impl().handle_domain()}"
+  # 与当前 PDS 服务子域规则一致;客户端只能选择前缀,不能覆盖域名。
+  defp fetch_username(%{"username" => username}) when is_binary(username) do
+    username = username |> String.trim() |> String.downcase()
+
+    if byte_size(username) in 3..18 and
+         Regex.match?(~r/\A[a-z0-9][a-z0-9-]*[a-z0-9]\z/, username),
+       do: {:ok, username},
+       else: {:error, :invalid_username}
   end
 
-  defp fetch_nickname(%{"nickname" => nickname}) when is_binary(nickname) do
-    nickname = String.trim(nickname)
-    if String.length(nickname) in 1..64, do: {:ok, nickname}, else: {:error, :invalid_nickname}
+  defp fetch_username(_), do: {:error, :invalid_username}
+
+  defp registration_error(conn, {:pds, "com.atproto.server.createAccount", 400, error})
+       when is_binary(error) do
+    if error == "HandleNotAvailable" or
+         String.starts_with?(error, [
+           "HandleNotAvailable:",
+           "InvalidRequest: Handle already taken:"
+         ]) do
+      conn
+      |> put_status(:unprocessable_entity)
+      |> json(%{errors: %{detail: "用户名已被使用，请换一个用户名"}})
+    else
+      registration_error(conn, :pds_error)
+    end
   end
 
-  defp fetch_nickname(_), do: {:error, :invalid_nickname}
+  defp registration_error(conn, _) do
+    conn |> put_status(:bad_gateway) |> json(%{errors: %{detail: "创建账号失败"}})
+  end
 
   # 密码不落 rice 的库,但长度还是要挡一道 —— PDS 那边的下限是 8
   defp fetch_password(%{"password" => password})

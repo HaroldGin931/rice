@@ -12,7 +12,12 @@ Ready to run in production? Please [check our deployment guides](https://phoenix
 ## Registration and Semi login
 
 The existing registration flow verifies SMS/email, creates a PDS account, and returns
-both Rice and PDS sessions. Production defaults to `RICE_VERIFICATION_MODE=live`:
+both Rice and PDS sessions.
+Registration accepts a `username` prefix (3–18 letters, digits or hyphens, beginning
+and ending with a letter or digit); the server appends `PDS_HANDLE_DOMAIN` and
+initializes the nickname from that prefix. See [the registration API](docs/api/registration_controller.md).
+
+Production defaults to `RICE_VERIFICATION_MODE=live`:
 unconfigured delivery channels fail explicitly. `log` is an opt-in isolated-test mode;
 it does not send real messages. SMS uses `ALIYUN_SMS_ACCESS_KEY_ID`,
 `ALIYUN_SMS_ACCESS_KEY_SECRET`, `ALIYUN_SMS_SIGN_NAME`, `ALIYUN_SMS_TEMPLATE_CODE`.
