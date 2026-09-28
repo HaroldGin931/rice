@@ -1,6 +1,19 @@
 defmodule RiceWeb.Api.TaskControllerTest do
   use RiceWeb.ConnCase, async: true
 
+  test "个人列表允许访客，但拒绝无效或过期的 Bearer 令牌" do
+    {:ok, expired} = Rice.Accounts.issue_token(user_fixture(), validity_days: -1)
+
+    for path <- ["/api/tasks?mine=applied", "/api/events?mine=applied"] do
+      assert %{"data" => []} = build_conn() |> get(path) |> json_response(200)
+
+      for token <- ["invalid", expired] do
+        assert %{"errors" => %{"detail" => "未认证"}} =
+                 build_conn() |> authed(token) |> get(path) |> json_response(401)
+      end
+    end
+  end
+
   test "公开读取任务，只有社区管理员可发布", %{conn: conn} do
     publisher = task_publisher_fixture()
     task = task_fixture(publisher, %{title: "村史整理"})
