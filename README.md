@@ -15,7 +15,9 @@ The existing registration flow verifies SMS/email, creates a PDS account, and re
 both Rice and PDS sessions.
 Registration accepts a `username` prefix (3–18 letters, digits or hyphens, beginning
 and ending with a letter or digit); the server appends `PDS_HANDLE_DOMAIN` and
-initializes the nickname from that prefix. See [the registration API](docs/api/registration_controller.md).
+initializes the nickname from that prefix. The routes and request handling are in
+[`router.ex`](lib/rice_web/router.ex) and
+[`registration_controller.ex`](lib/rice_web/api/registration_controller.ex).
 
 Production defaults to `RICE_VERIFICATION_MODE=live`:
 unconfigured delivery channels fail explicitly. `log` is an opt-in isolated-test mode;
@@ -50,10 +52,10 @@ test/rice/bridge_test.exs`. Req.Test replaces Semi HTTP and Mox replaces externa
 and message delivery only inside tests. Real-provider validation follows deployment
 configuration; test success is not proof that a real SMS/email was delivered.
 
-## Learn more
+## API source
 
-* Official website: https://www.phoenixframework.org/
-* Guides: https://phoenix.hexdocs.pm/overview.html
-* Docs: https://phoenix.hexdocs.pm
-* Forum: https://elixirforum.com/c/phoenix-forum
-* Source: https://github.com/phoenixframework/phoenix
+[`router.ex`](lib/rice_web/router.ex) lists the HTTP endpoints. Controllers in
+[`lib/rice_web/api`](lib/rice_web/api), their JSON modules, and matching
+[`test/rice_web`](test/rice_web) files define request, response, and permission
+behavior. Shared authentication is in [`auth.ex`](lib/rice_web/api/auth.ex);
+error responses are in [`fallback_controller.ex`](lib/rice_web/api/fallback_controller.ex).

@@ -12,6 +12,7 @@ defmodule Rice.Tasks do
   alias Rice.{Grains, Pagination, Repo}
 
   @overdue_detail "交付已超时，仍可提交成果"
+  @public_visibility_grace_seconds 24 * 60 * 60
 
   def list_tasks(user, params \\ %{}) do
     query =
@@ -984,12 +985,19 @@ defmodule Rice.Tasks do
 
   defp visible_to?(%Task{status: "open", application_deadline: deadline} = task, user) do
     is_nil(deadline) or
-      DateTime.compare(deadline, DateTime.add(DateTime.utc_now(), -86_400)) == :gt or
+      DateTime.compare(
+        deadline,
+        DateTime.add(DateTime.utc_now(), -@public_visibility_grace_seconds)
+      ) == :gt or
       private_viewer?(task, user)
   end
 
   defp visible_to?(%Task{status: "expired", application_deadline: deadline} = task, user) do
-    (deadline && DateTime.compare(deadline, DateTime.add(DateTime.utc_now(), -86_400)) == :gt) ||
+    (deadline &&
+       DateTime.compare(
+         deadline,
+         DateTime.add(DateTime.utc_now(), -@public_visibility_grace_seconds)
+       ) == :gt) ||
       private_viewer?(task, user)
   end
 
@@ -1006,7 +1014,7 @@ defmodule Rice.Tasks do
     do: query
 
   defp scope_visibility(query, _user, _mine) do
-    cutoff = DateTime.add(DateTime.utc_now(), -86_400)
+    cutoff = DateTime.add(DateTime.utc_now(), -@public_visibility_grace_seconds)
 
     from(t in query,
       where:
