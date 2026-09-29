@@ -251,6 +251,19 @@ defmodule Rice.EventsTest do
     assert reopened.status == "open"
   end
 
+  test "旧活动缺少收款社区时空更新不会重新开放", ctx do
+    event = event!(ctx)
+    {:ok, cancelled} = Events.cancel(ctx.host, event)
+    legacy = Repo.update!(Ecto.Changeset.change(cancelled, settlement_node_id: nil))
+    history_count = Repo.aggregate(EventHistory, :count)
+
+    assert {:ok, unchanged} = Events.update_event(ctx.host, legacy, %{})
+    assert unchanged.status == "cancelled"
+    assert unchanged.round == 1
+    assert unchanged.settlement_node_id == nil
+    assert Repo.aggregate(EventHistory, :count) == history_count
+  end
+
   test "换社区重开后新社区管理员不能查看旧期私人申请", ctx do
     next_node = node_fixture(%{user_id: ctx.host.id})
     new_manager = user_fixture()

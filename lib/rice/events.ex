@@ -223,10 +223,15 @@ defmodule Rice.Events do
       event
       |> Event.changeset(attrs, published_edit: true)
       |> Changeset.put_change(:node_id, node_id)
-      |> Changeset.put_change(:settlement_node_id, node_id)
 
     now = DateTime.utc_now()
-    reopening? = event.status == "cancelled" and map_size(changeset.changes) > 0
+    editing? = map_size(changeset.changes) > 0
+    reopening? = event.status == "cancelled" and editing?
+
+    changeset =
+      if editing?,
+        do: Changeset.put_change(changeset, :settlement_node_id, node_id),
+        else: changeset
 
     changeset =
       cond do

@@ -633,6 +633,26 @@ defmodule Rice.TasksTest do
     assert Repo.get!(Rice.Tasks.Task, task.id).round == 1
   end
 
+  test "旧任务缺少出资社区时空更新不会重新开放" do
+    publisher = task_publisher_fixture()
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "旧任务",
+               description: "保留原状态",
+               organizer_contact: "社区服务台"
+             })
+
+    assert {:ok, cancelled} = Tasks.cancel(publisher, task)
+    legacy = Repo.update!(change(cancelled, funding_node_id: nil))
+
+    assert {:ok, unchanged} = Tasks.update_task(publisher, legacy, %{})
+    assert unchanged.status == "cancelled"
+    assert unchanged.round == 1
+    assert unchanged.funding_node_id == nil
+    refute Repo.exists?(from(e in Rice.Tasks.Event, where: not is_nil(e.before)))
+  end
+
   test "取消后重新开放空白新轮次，旧申请仍可私下查看且不能操作" do
     publisher = task_publisher_fixture()
     worker = user_fixture()
