@@ -117,7 +117,10 @@ defmodule RiceWeb.Api.CommunityAdminTest do
       |> post("#{path}/#{legacy["id"]}/applications", %{contact: "历史申请私人电话"})
       |> json_response(success)
 
-      assert recipients(@kind, legacy["id"]) == [ctx.owner.id]
+      expected =
+        if @kind == "tasks", do: [ctx.owner.id, ctx.manager.id], else: [ctx.owner.id]
+
+      assert Enum.sort(recipients(@kind, legacy["id"])) == Enum.sort(expected)
 
       legacy_view =
         build_conn()

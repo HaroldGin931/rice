@@ -184,7 +184,7 @@ defmodule Rice.Tasks do
   defp update_current_published(user, task, attrs) do
     with true <- can_edit?(task, user) or {:error, :forbidden},
          true <-
-           task.status in ~w(open in_progress overdue under_review completed expired cancelled) or
+           task.status in ~w(open in_progress overdue under_review expired cancelled) or
              {:error, :conflict} do
       attrs = Map.drop(attrs, ["client_request_id", :client_request_id])
       task = Repo.preload(task, :image_links)
@@ -194,18 +194,15 @@ defmodule Rice.Tasks do
            changeset <-
              task
              |> Task.create_changeset(attrs, published_edit: true)
-             |> Ecto.Changeset.put_change(:node_id, node_id),
+             |> Ecto.Changeset.put_change(:node_id, node_id)
+             |> validate_active_reward_edit(task)
+             |> validate_reopen_schedule(task),
            {:ok, _} <- Ecto.Changeset.apply_action(changeset, :update) do
         before = task_snapshot(task)
         amount = Ecto.Changeset.get_field(changeset, :reward_amount)
         application_deadline = Ecto.Changeset.get_field(changeset, :application_deadline)
 
-        reopening? =
-          task.status in ~w(completed expired cancelled) and
-            (Ecto.Changeset.changed?(changeset, :application_deadline) or
-               Ecto.Changeset.changed?(changeset, :execution_deadline)) and
-            not is_nil(application_deadline) and
-            DateTime.compare(application_deadline, DateTime.utc_now()) == :gt
+        reopening? = task.status in ~w(expired cancelled) and changeset.changes != %{}
 
         expiring? =
           task.status == "open" and not is_nil(application_deadline) and
@@ -226,19 +223,10 @@ defmodule Rice.Tasks do
               deadline -> DateTime.compare(deadline, DateTime.utc_now()) == :gt
             end
 
-        changed_reward? = amount != task.reward_amount or node_id != task.node_id or reopening?
-
         with {:ok, changeset} <-
-               if(task.status in ~w(completed expired cancelled) and not reopening?,
+               if(task.status in ~w(expired cancelled) and not reopening?,
                  do: stage_terminal_payer(task, changeset, node_id),
-                 else:
-                   revise_reward(
-                     task,
-                     changeset,
-                     amount,
-                     node_id,
-                     changed_reward? and not expiring?
-                   )
+                 else: revise_reward(task, changeset, amount, node_id, reopening?)
                ),
              {:ok, changeset} <- expire_edited_task(task, changeset, expiring?, amount, node_id),
              :ok <- maybe_begin_next_round(task, reopening?),
@@ -282,6 +270,34 @@ defmodule Rice.Tasks do
       error -> error
     end
   end
+
+  defp validate_active_reward_edit(changeset, %Task{status: status})
+       when status in ~w(open in_progress overdue under_review) do
+    if Ecto.Changeset.changed?(changeset, :reward_amount),
+      do: Ecto.Changeset.add_error(changeset, :reward_amount, "已发布任务不能修改稻米报酬"),
+      else: changeset
+  end
+
+  defp validate_active_reward_edit(changeset, _task), do: changeset
+
+  defp validate_reopen_schedule(changeset, %Task{status: status})
+       when status in ~w(expired cancelled) do
+    if changeset.changes == %{} do
+      changeset
+    else
+      case Ecto.Changeset.get_field(changeset, :application_deadline) do
+        nil ->
+          Ecto.Changeset.add_error(changeset, :application_deadline, "重新开放需要将来的申请截止时间")
+
+        deadline ->
+          if DateTime.compare(deadline, DateTime.utc_now()) == :gt,
+            do: changeset,
+            else: Ecto.Changeset.add_error(changeset, :application_deadline, "重新开放需要将来的申请截止时间")
+      end
+    end
+  end
+
+  defp validate_reopen_schedule(changeset, _task), do: changeset
 
   defp next_edited_status(_status, true, _, _, _), do: "open"
   defp next_edited_status(_status, _, true, _, _), do: "expired"
@@ -334,23 +350,7 @@ defmodule Rice.Tasks do
       Repo.all(from s in Submission, where: s.task_id == ^task.id and s.round == ^task.round)
 
     with :ok <- archive_applications(task, applications),
-         :ok <- archive_submissions(task, submissions) do
-      Enum.reduce_while(applications, :ok, fn application, _ ->
-        cloned =
-          %Application{
-            task_id: task.id,
-            user_id: application.user_id,
-            round: task.round + 1,
-            contact: application.contact,
-            reason: application.reason
-          }
-
-        case Repo.insert(cloned) do
-          {:ok, _} -> {:cont, :ok}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-      end)
-    end
+         do: archive_submissions(task, submissions)
   end
 
   defp archive_applications(task, applications) do
@@ -393,7 +393,6 @@ defmodule Rice.Tasks do
        when not is_nil(reason),
        do: "changes_requested"
 
-  defp previous_submission_status(%Task{status: "completed"}, _submission), do: "approved"
   defp previous_submission_status(_task, _submission), do: "pending"
 
   defp maybe_notify_edited_due(_old, _saved, false, false), do: :ok
@@ -421,7 +420,13 @@ defmodule Rice.Tasks do
 
   defp revise_reward(task, changeset, amount, node_id, true) do
     old_account = reward_account(task)
-    new_account = if(node_id == task.node_id, do: old_account, else: {:node, node_id})
+
+    new_account =
+      if node_id == task.node_id and
+           (is_nil(task.funding_node_id) or task.funding_node_id == node_id),
+         do: old_account,
+         else: {:node, node_id}
+
     Grains.lock_business_accounts(Repo, [old_account, new_account])
 
     with {:ok, _} <- maybe_refund_edited_reward(task),
@@ -430,7 +435,10 @@ defmodule Rice.Tasks do
        changeset
        |> Ecto.Changeset.put_change(
          :funding_node_id,
-         if(node_id == task.node_id, do: task.funding_node_id, else: node_id)
+         case new_account do
+           {:node, id} -> id
+           _ -> nil
+         end
        )
        |> Ecto.Changeset.put_change(:reward_status, if(amount > 0, do: "reserved", else: "none"))
        |> Ecto.Changeset.put_change(:reward_subject_uri, subject)}
@@ -1321,10 +1329,8 @@ defmodule Rice.Tasks do
 
   defp reward_detail(_task, _action), do: nil
 
-  defp manager_ids(%Task{funding_node_id: nil, creator_id: id}), do: [id]
-
   defp manager_ids(task),
-    do: Rice.Community.admin_ids(Repo.get!(Rice.Community.Node, task.funding_node_id))
+    do: Rice.Community.admin_ids(Repo.get!(Rice.Community.Node, task.node_id))
 
   defp notification_rows(builder, repo) when is_function(builder, 1), do: builder.(repo)
   defp notification_rows(rows, _repo), do: rows

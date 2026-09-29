@@ -214,8 +214,7 @@ defmodule Rice.Events do
 
   defp update_published!(user, event, attrs) do
     require!(can_edit?(event, user), :forbidden)
-    terminal? = event.status in ["completed", "cancelled"]
-    require!(event.status in ["open", "in_progress"] or terminal?)
+    require!(event.status in ["open", "in_progress", "cancelled"])
     event = Repo.preload(event, :image_links)
     node_id = attrs["node_id"] || event.node_id
     if node_id != event.node_id, do: require_node!(user, node_id)
@@ -226,21 +225,27 @@ defmodule Rice.Events do
       |> Changeset.put_change(:node_id, node_id)
       |> Changeset.put_change(:settlement_node_id, node_id)
 
+    now = DateTime.utc_now()
+    reopening? = event.status == "cancelled" and map_size(changeset.changes) > 0
+
+    changeset =
+      cond do
+        event.status in ["open", "in_progress"] and
+            Changeset.changed?(changeset, :fee_amount) ->
+          Changeset.add_error(changeset, :fee_amount, "已发布活动不能修改报名费")
+
+        reopening? and
+            (is_nil(Changeset.get_field(changeset, :application_deadline)) or
+               not before?(now, Changeset.get_field(changeset, :application_deadline))) ->
+          Changeset.add_error(changeset, :application_deadline, "报名截止时间必须在将来")
+
+        true ->
+          changeset
+      end
+
     unwrap!(Changeset.apply_action(changeset, :update))
 
-    now = DateTime.utc_now()
-    deadline = Changeset.get_field(changeset, :application_deadline)
-    starts_at = Changeset.get_field(changeset, :starts_at)
-
-    reopening? =
-      terminal? and not is_nil(event.published_at) and
-        Enum.any?(
-          [:application_deadline, :starts_at, :ends_at],
-          &Changeset.changed?(changeset, &1)
-        ) and before?(now, deadline) and
-        before?(now, starts_at)
-
-    unless reopening? do
+    if event.status in ["open", "in_progress"] do
       approved =
         Repo.aggregate(
           from(a in Application,
@@ -260,12 +265,12 @@ defmodule Rice.Events do
           Changeset.change(changeset,
             status: "open",
             round: event.round + 1,
-            published_at: DateTime.utc_now()
+            published_at: now
           ),
         else: changeset
 
     saved = changeset |> Repo.update() |> unwrap!() |> Repo.preload(:image_links, force: true)
-    if reopening?, do: carry_applicants_forward!(event, saved, user.id)
+
     after_snapshot = event_snapshot(saved)
 
     if before != after_snapshot do
@@ -286,78 +291,6 @@ defmodule Rice.Events do
     if event.status == "open" and not before?(now, saved.starts_at),
       do: start_locked!(saved, now),
       else: saved
-  end
-
-  defp carry_applicants_forward!(before, after_event, actor_id) do
-    prior =
-      if before.status == "cancelled" do
-        Repo.all(
-          from(a in Application,
-            join: h in EventHistory,
-            on:
-              h.application_id == a.id and h.round == ^before.round and
-                h.action == "application_cancelled",
-            where:
-              a.event_id == ^before.id and a.round == ^before.round and a.status == "cancelled" and
-                h.from_status in ["pending", "approved"],
-            order_by: a.user_id,
-            select: {a, h.from_status}
-          )
-        )
-      else
-        Repo.all(
-          from(a in Application,
-            where:
-              a.event_id == ^before.id and a.round == ^before.round and a.status == "approved",
-            order_by: a.user_id,
-            select: {a, "approved"}
-          )
-        )
-      end
-
-    require!(
-      Enum.count(prior, fn {_, status} -> status == "approved" end) <= after_event.capacity,
-      :capacity_full
-    )
-
-    lock_accounts!(Enum.map(prior, fn {old, _} -> old.user_id end))
-
-    Enum.each(prior, fn {old, status} ->
-      application =
-        unwrap!(
-          Repo.insert(%Application{
-            event_id: after_event.id,
-            user_id: old.user_id,
-            round: after_event.round,
-            reason: old.reason,
-            contact: old.contact,
-            status: status,
-            fee_amount: after_event.fee_amount,
-            settlement_node_id: after_event.settlement_node_id,
-            payment_status: if(after_event.fee_amount > 0, do: "reserved", else: "none")
-          })
-        )
-
-      if application.fee_amount > 0,
-        do:
-          unwrap!(
-            Grains.reserve_business(
-              Repo,
-              old.user_id,
-              application.fee_amount,
-              subject(application)
-            )
-          )
-
-      record!(after_event, actor_id, application.id, "application_renewed", nil, status)
-
-      detail =
-        if application.fee_amount > 0,
-          do: "活动新一期已开启，报名费已重新冻结",
-          else: "活动新一期已开启，申请已延续"
-
-      notify!(after_event, old.user_id, actor_id, "event_application_renewed", detail)
-    end)
   end
 
   defp event_snapshot(event) do
@@ -618,7 +551,7 @@ defmodule Rice.Events do
     [
       {"edit",
        can_edit?(event, user) and
-         event.status in ["draft", "open", "in_progress", "completed", "cancelled"]},
+         event.status in ["draft", "open", "in_progress", "cancelled"]},
       {"publish", host? and event.status == "draft"},
       {"cancel", host? and event.status in ["draft", "open", "in_progress"]},
       {"finish",

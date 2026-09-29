@@ -87,9 +87,9 @@ defmodule RiceWeb.Api.TaskJSON do
 
   defp visible_applications(_task, _applications, _user, _detail?), do: nil
 
-  defp visible_past_applications(task, applications, %User{id: user_id} = user, true) do
+  defp visible_past_applications(task, applications, %User{id: user_id}, true) do
     applications
-    |> Enum.filter(&(Rice.Tasks.can_manage?(task, user) || &1.user_id == user_id))
+    |> Enum.filter(&(task.creator_id == user_id || &1.user_id == user_id))
     |> Enum.map(&application(&1, task))
   end
 
@@ -103,9 +103,9 @@ defmodule RiceWeb.Api.TaskJSON do
 
   defp visible_submissions(_task, _submissions, _user, _detail?), do: nil
 
-  defp visible_past_submissions(task, submissions, %User{id: user_id} = user, true) do
+  defp visible_past_submissions(task, submissions, %User{id: user_id}, true) do
     submissions
-    |> Enum.filter(&(Rice.Tasks.can_manage?(task, user) || &1.user_id == user_id))
+    |> Enum.filter(&(task.creator_id == user_id || &1.user_id == user_id))
     |> Enum.map(&submission(&1, task))
   end
 
@@ -192,7 +192,7 @@ defmodule RiceWeb.Api.TaskJSON do
     []
     |> maybe_add(task.status == "draft" and manager?, "publish")
     |> maybe_add(
-      task.status in ~w(draft open in_progress overdue under_review completed expired cancelled) and
+      task.status in ~w(draft open in_progress overdue under_review expired cancelled) and
         Rice.Tasks.can_edit?(task, user),
       "edit"
     )

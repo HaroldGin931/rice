@@ -26,7 +26,7 @@ defmodule RiceWeb.Api.EventJSON do
     visible_past =
       cond do
         not detail? or is_nil(user) -> []
-        Events.can_manage?(event, user) -> past
+        user.id == event.creator_id -> past
         true -> Enum.filter(past, &(&1.user_id == user.id))
       end
 
