@@ -1,10 +1,12 @@
 defmodule Rice.Workers.ExpireTasks do
-  @moduledoc "记录申请截止和执行逾期，保留候选与冻结报酬。"
+  @moduledoc "推进已到期任务的失效和交付超时状态。"
   use Oban.Worker, queue: :default, max_attempts: 3
 
   @impl true
   def perform(_job) do
-    Rice.Tasks.check_due_tasks()
-    :ok
+    case Rice.Tasks.check_due_tasks() do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 end

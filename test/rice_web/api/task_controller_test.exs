@@ -292,6 +292,75 @@ defmodule RiceWeb.Api.TaskControllerTest do
            |> response(204)
   end
 
+  test "交付超时后仍可通过接口补交" do
+    publisher = task_publisher_fixture()
+    {:ok, publisher_token} = Rice.Accounts.issue_token(publisher)
+    {worker, worker_token} = user_with_token()
+    task = task_fixture(publisher)
+    {:ok, application} = Rice.Tasks.apply(worker, task, %{contact: "测试联系方式"})
+    {:ok, appointed} = Rice.Tasks.appoint(publisher, task, application.id)
+
+    appointed
+    |> Ecto.Changeset.change(execution_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+    |> Rice.Repo.update!()
+
+    assert {:ok, [_]} = Rice.Tasks.check_due_tasks()
+
+    overdue =
+      build_conn()
+      |> authed(worker_token)
+      |> get(~p"/api/tasks/#{task.id}")
+      |> json_response(200)
+
+    assert overdue["data"]["status"] == "overdue"
+    assert overdue["data"]["overdue"] == true
+    assert "submit_result" in overdue["data"]["allowed_actions"]
+
+    submitted =
+      build_conn()
+      |> authed(worker_token)
+      |> post(~p"/api/tasks/#{task.id}/submissions", %{body: "补交成果"})
+      |> json_response(201)
+
+    assert submitted["data"]["status"] == "under_review"
+    assert submitted["data"]["overdue"] == false
+    submission_id = hd(submitted["data"]["submissions"])["id"]
+
+    assert %{"data" => %{"status" => "completed"}} =
+             build_conn()
+             |> authed(publisher_token)
+             |> post(~p"/api/tasks/#{task.id}/submissions/#{submission_id}/approve")
+             |> json_response(200)
+  end
+
+  test "定时任务处理前申请已截止时，申请状态立即显示已失效" do
+    publisher = task_publisher_fixture()
+    {_worker, worker_token} = user_with_token()
+    task = task_fixture(publisher)
+
+    assert build_conn()
+           |> authed(worker_token)
+           |> post(~p"/api/tasks/#{task.id}/applications", %{contact: "测试联系方式"})
+           |> json_response(201)
+
+    task
+    |> Ecto.Changeset.change(application_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+    |> Rice.Repo.update!()
+
+    assert Rice.Repo.get!(Rice.Tasks.Task, task.id).status == "open"
+
+    assert %{
+             "data" => %{
+               "my_application_status" => "expired",
+               "my_application" => %{"status" => "expired"}
+             }
+           } =
+             build_conn()
+             |> authed(worker_token)
+             |> get(~p"/api/tasks/#{task.id}")
+             |> json_response(200)
+  end
+
   test "任务状态被推进后重复动作返回 409", %{conn: conn} do
     publisher = task_publisher_fixture()
     {:ok, publisher_token} = Rice.Accounts.issue_token(publisher)

@@ -47,7 +47,7 @@ defmodule RiceWeb.Api.TaskJSON do
       node: RiceWeb.Api.NodeJSON.embed(task.node),
       execution_deadline: task.execution_deadline,
       application_closed: past?(task.application_deadline),
-      overdue: task.status in ["in_progress", "under_review"] and past?(task.execution_deadline),
+      overdue: task.status == "overdue",
       status: task.status,
       creator: public_user(task.creator),
       assignee: public_user(task.assignee),
@@ -155,7 +155,7 @@ defmodule RiceWeb.Api.TaskJSON do
     manager? = Rice.Tasks.can_manage?(task, user)
 
     can_review_applications? =
-      task.status == "open" and manager? and
+      task.status == "open" and not past?(task.application_deadline) and manager? and
         Enum.any?(applications, &is_nil(&1.rejected_at))
 
     []
@@ -168,8 +168,16 @@ defmodule RiceWeb.Api.TaskJSON do
     )
     |> maybe_add(can_review_applications?, "appoint")
     |> maybe_add(can_review_applications?, "reject_application")
-    |> maybe_add(task.status in ["open", "draft"] and manager?, "cancel")
-    |> maybe_add(task.status == "in_progress" and task.assignee_id == user_id, "submit_result")
+    |> maybe_add(
+      manager? and
+        (task.status == "draft" or
+           (task.status == "open" and not past?(task.application_deadline))),
+      "cancel"
+    )
+    |> maybe_add(
+      task.status in ["in_progress", "overdue"] and task.assignee_id == user_id,
+      "submit_result"
+    )
     |> maybe_add(task.status == "under_review" and manager?, "approve_result")
     |> maybe_add(task.status == "under_review" and manager?, "request_changes")
     |> Enum.reverse()
@@ -193,7 +201,9 @@ defmodule RiceWeb.Api.TaskJSON do
        when not is_nil(rejected_at),
        do: "not_selected"
 
-  defp application_status(_application, %{status: "open"}), do: "pending"
+  defp application_status(_application, %{status: "open", application_deadline: deadline}),
+    do: if(past?(deadline), do: "expired", else: "pending")
+
   defp application_status(_application, %{status: "cancelled"}), do: "cancelled"
   defp application_status(_application, %{status: "expired"}), do: "expired"
   defp application_status(_application, _task), do: "not_selected"

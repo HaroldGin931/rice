@@ -2,7 +2,7 @@ defmodule Rice.Tasks.Task do
   @moduledoc "任务主体；新奖励由社区账户冻结，旧任务保留原个人出资账户。"
   use Rice.Schema
 
-  @statuses ~w(draft open in_progress under_review completed expired cancelled)
+  @statuses ~w(draft open in_progress overdue under_review completed expired cancelled)
 
   schema "tasks" do
     field(:title, :string)
