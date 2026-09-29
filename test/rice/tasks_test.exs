@@ -467,7 +467,7 @@ defmodule Rice.TasksTest do
     assert mine.id == task.id
   end
 
-  test "已发布任务修改社区不挪动原冻结，取消后以新金额和社区重新开放" do
+  test "进行中任务不能换社区，取消后可用新金额和社区开启新一期" do
     publisher = task_publisher_fixture()
     first_node = funded_node_fixture(publisher, 100)
     second_node = node_fixture(%{user_id: publisher.id})
@@ -492,9 +492,13 @@ defmodule Rice.TasksTest do
 
     assert "已发布任务不能修改稻米报酬" in errors_on(changeset).reward_amount
 
+    assert {:error, changeset} =
+             Tasks.update_task(publisher, task, %{node_id: second_node.id})
+
+    assert "已发布任务不能修改所属社区" in errors_on(changeset).node_id
+
     assert {:ok, edited} =
              Tasks.update_task(publisher, task, %{
-               node_id: second_node.id,
                title: "新任务",
                description: "新说明",
                organizer_contact: "新联系方式"
@@ -514,7 +518,7 @@ defmodule Rice.TasksTest do
     assert history.before["funding_node_id"] == first_node.id
     assert history.after["funding_node_id"] == first_node.id
     assert history.before["node_name"] == first_node.name
-    assert history.after["node_name"] == second_node.name
+    assert history.after["node_name"] == first_node.name
     assert history.before["attachment_ids"] == []
 
     old_uri = "rice://tasks/#{task.id}"
@@ -537,6 +541,7 @@ defmodule Rice.TasksTest do
 
     assert {:ok, reopened} =
              Tasks.update_task(publisher, cancelled, %{
+               node_id: second_node.id,
                reward_amount: 70,
                title: "重新开放的任务"
              })
@@ -556,7 +561,7 @@ defmodule Rice.TasksTest do
     assert Rice.Grains.reconcile().ok?
   end
 
-  test "取消后把申请截止改到将来会重新开放并冻结新一笔奖励" do
+  test "取消后即使不改字段，保存也会重新开放并冻结新一笔奖励" do
     publisher = task_publisher_fixture()
     node = funded_node_fixture(publisher, 100)
 
@@ -572,21 +577,14 @@ defmodule Rice.TasksTest do
     assert {:ok, cancelled} = Tasks.cancel(publisher, task)
     assert cancelled.reward_status == "refunded"
 
-    assert {:ok, unchanged} =
+    assert {:ok, reopened} =
              Tasks.update_task(publisher, cancelled, %{title: cancelled.title, attachment_ids: []})
 
-    assert unchanged.status == "cancelled"
-    assert unchanged.round == 1
-    assert Repo.aggregate(Rice.Grains.Receipt, :count) == 2
-
-    assert {:ok, reopened} =
-             Tasks.update_task(publisher, cancelled, %{
-               application_deadline: DateTime.add(DateTime.utc_now(), 7200)
-             })
-
     assert reopened.status == "open"
+    assert reopened.round == 2
     assert reopened.reward_status == "reserved"
     assert reopened.reward_subject_uri != "rice://tasks/#{task.id}"
+    assert Repo.aggregate(Rice.Grains.Receipt, :count) == 3
 
     assert Repo.get_by!(Rice.Grains.Receipt,
              subject_uri: "rice://tasks/#{task.id}",
@@ -626,6 +624,9 @@ defmodule Rice.TasksTest do
     assert edited.application_deadline == past
     assert edited.status == "expired"
 
+    assert {:error, changeset} = Tasks.update_task(publisher, edited, %{})
+    assert "重新开放需要将来的申请截止时间" in errors_on(changeset).application_deadline
+
     assert {:error, changeset} =
              Tasks.update_task(publisher, edited, %{application_deadline: DateTime.add(past, -60)})
 
@@ -633,7 +634,7 @@ defmodule Rice.TasksTest do
     assert Repo.get!(Rice.Tasks.Task, task.id).round == 1
   end
 
-  test "旧任务缺少出资社区时空更新不会重新开放" do
+  test "旧任务缺少出资社区时仍须提供有效未来日程才能重新开放" do
     publisher = task_publisher_fixture()
 
     assert {:ok, task} =
@@ -646,10 +647,11 @@ defmodule Rice.TasksTest do
     assert {:ok, cancelled} = Tasks.cancel(publisher, task)
     legacy = Repo.update!(change(cancelled, funding_node_id: nil))
 
-    assert {:ok, unchanged} = Tasks.update_task(publisher, legacy, %{})
-    assert unchanged.status == "cancelled"
-    assert unchanged.round == 1
-    assert unchanged.funding_node_id == nil
+    assert {:error, changeset} = Tasks.update_task(publisher, legacy, %{})
+    assert "重新开放需要将来的申请截止时间" in errors_on(changeset).application_deadline
+    assert Repo.get!(Rice.Tasks.Task, task.id).status == "cancelled"
+    assert Repo.get!(Rice.Tasks.Task, task.id).round == 1
+    assert Repo.get!(Rice.Tasks.Task, task.id).funding_node_id == nil
     refute Repo.exists?(from(e in Rice.Tasks.Event, where: not is_nil(e.before)))
   end
 
@@ -757,7 +759,6 @@ defmodule Rice.TasksTest do
     publisher = task_publisher_fixture()
     worker = user_fixture()
     old_node = funded_node_fixture(publisher, 100)
-    new_node = node_fixture(%{user_id: publisher.id})
 
     assert {:ok, task} =
              Tasks.create_task(publisher, %{
@@ -773,7 +774,6 @@ defmodule Rice.TasksTest do
 
     assert {:ok, expired} =
              Tasks.update_task(publisher, task, %{
-               node_id: new_node.id,
                application_deadline: DateTime.add(DateTime.utc_now(), -60)
              })
 
@@ -781,7 +781,7 @@ defmodule Rice.TasksTest do
     assert expired.round == 1
     assert expired.reward_status == "refunded"
     assert expired.reward_amount == 40
-    assert expired.funding_node_id == new_node.id
+    assert expired.funding_node_id == old_node.id
 
     assert Repo.get_by!(Rice.Grains.Receipt,
              subject_uri: "rice://tasks/#{task.id}",

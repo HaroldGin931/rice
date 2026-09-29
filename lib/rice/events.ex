@@ -217,36 +217,39 @@ defmodule Rice.Events do
     require!(event.status in ["open", "in_progress", "cancelled"])
     event = Repo.preload(event, :image_links)
     node_id = attrs["node_id"] || event.node_id
-    if node_id != event.node_id, do: require_node!(user, node_id)
+
+    if node_id != event.node_id and event.status == "cancelled",
+      do: require_node!(user, node_id)
 
     changeset =
       event
       |> Event.changeset(attrs, published_edit: true)
       |> Changeset.put_change(:node_id, node_id)
+      |> Changeset.put_change(
+        :settlement_node_id,
+        if(event.status == "cancelled", do: node_id, else: event.settlement_node_id)
+      )
 
     now = DateTime.utc_now()
-    editing? = map_size(changeset.changes) > 0
-    reopening? = event.status == "cancelled" and editing?
+    reopening? = event.status == "cancelled"
 
     changeset =
-      if editing?,
-        do: Changeset.put_change(changeset, :settlement_node_id, node_id),
+      if event.status in ["open", "in_progress"] and Changeset.changed?(changeset, :node_id),
+        do: Changeset.add_error(changeset, :node_id, "已发布活动不能更换所属社区"),
         else: changeset
 
     changeset =
-      cond do
-        event.status in ["open", "in_progress"] and
-            Changeset.changed?(changeset, :fee_amount) ->
-          Changeset.add_error(changeset, :fee_amount, "已发布活动不能修改报名费")
+      if event.status in ["open", "in_progress"] and
+           Changeset.changed?(changeset, :fee_amount),
+         do: Changeset.add_error(changeset, :fee_amount, "已发布活动不能修改报名费"),
+         else: changeset
 
-        reopening? and
-            (is_nil(Changeset.get_field(changeset, :application_deadline)) or
-               not before?(now, Changeset.get_field(changeset, :application_deadline))) ->
-          Changeset.add_error(changeset, :application_deadline, "报名截止时间必须在将来")
-
-        true ->
-          changeset
-      end
+    changeset =
+      if reopening? and
+           (is_nil(Changeset.get_field(changeset, :application_deadline)) or
+              not before?(now, Changeset.get_field(changeset, :application_deadline))),
+         do: Changeset.add_error(changeset, :application_deadline, "报名截止时间必须在将来"),
+         else: changeset
 
     unwrap!(Changeset.apply_action(changeset, :update))
 

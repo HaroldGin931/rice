@@ -51,21 +51,22 @@ defmodule Rice.EventsTest do
     assert Rice.Grains.reconcile().ok?
   end
 
-  test "已发布活动不能改报名费，其他编辑保留旧结算社区并记录改动", ctx do
+  test "已发布活动不能改报名费或所属社区，其他编辑记录历史", ctx do
     second_node = node_fixture(%{user_id: ctx.host.id})
     event = event!(ctx, %{capacity: 2})
     assert {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
     first = application(event, ctx.first)
 
     assert {:error, %Ecto.Changeset{} = invalid} =
-             Events.update_event(ctx.host, event, %{fee_amount: 30})
+             Events.update_event(ctx.host, event, %{fee_amount: 30, node_id: second_node.id})
 
     assert Keyword.has_key?(invalid.errors, :fee_amount)
+    assert Keyword.has_key?(invalid.errors, :node_id)
     assert Repo.get!(Event, event.id).fee_amount == 20
+    assert Repo.get!(Event, event.id).node_id == ctx.node.id
 
     assert {:ok, edited} =
              Events.update_event(ctx.host, event, %{
-               "node_id" => second_node.id,
                "title" => "新活动",
                "description" => "新的活动介绍",
                "location" => "新地点",
@@ -73,8 +74,8 @@ defmodule Rice.EventsTest do
              })
 
     assert edited.id == event.id
-    assert edited.node_id == second_node.id
-    assert edited.settlement_node_id == second_node.id
+    assert edited.node_id == ctx.node.id
+    assert edited.settlement_node_id == ctx.node.id
     [history] = Enum.filter(edited.history, &(&1.action == "edited"))
     assert history.actor_id == ctx.host.id
     assert history.before["title"] == "社区活动"
@@ -83,7 +84,7 @@ defmodule Rice.EventsTest do
     assert history.after["fee_amount"] == 20
     assert history.before["attachment_ids"] == []
     assert history.before["node_name"] == ctx.node.name
-    assert history.after["node_name"] == second_node.name
+    assert history.after["node_name"] == ctx.node.name
     assert {:ok, _} = Events.update_event(ctx.host, edited, %{"title" => "新活动"})
     assert {:error, :forbidden} = Events.update_event(ctx.first, edited, %{"title" => "不能修改"})
     assert Repo.aggregate(from(h in EventHistory, where: h.action == "edited"), :count) == 1
@@ -93,7 +94,7 @@ defmodule Rice.EventsTest do
     assert first.fee_amount == 20
     assert Repo.get!(Application, first.id).settlement_node_id == ctx.node.id
     assert second.fee_amount == 20
-    assert second.settlement_node_id == second_node.id
+    assert second.settlement_node_id == ctx.node.id
     assert {:ok, edited} = Events.approve_application(ctx.host, edited, first.id)
     assert {:ok, edited} = Events.approve_application(ctx.host, edited, second.id)
     assert {:error, :capacity_full} = Events.update_event(ctx.host, edited, %{capacity: 1})
@@ -101,8 +102,8 @@ defmodule Rice.EventsTest do
     age_event!(edited)
     assert {:ok, finished} = Events.finish(ctx.host, edited)
     assert finished.status == "completed"
-    assert Repo.get!(Rice.Community.Node, ctx.node.id).grain_balance == 20
-    assert Repo.get!(Rice.Community.Node, second_node.id).grain_balance == 20
+    assert Repo.get!(Rice.Community.Node, ctx.node.id).grain_balance == 40
+    assert Repo.get!(Rice.Community.Node, second_node.id).grain_balance == 0
     assert Rice.Grains.reconcile().ok?
   end
 
@@ -231,16 +232,8 @@ defmodule Rice.EventsTest do
     {:ok, cancelled} = Events.cancel(ctx.host, event)
     age_event!(cancelled)
 
-    count = Repo.aggregate(EventHistory, :count)
-    assert {:ok, unchanged} = Events.update_event(ctx.host, cancelled, %{})
-    assert unchanged.status == "cancelled"
-    assert unchanged.round == 1
-    assert {:ok, unchanged} = Events.update_event(ctx.host, cancelled, %{title: event.title})
-    assert unchanged.status == "cancelled"
-    assert Repo.aggregate(EventHistory, :count) == count
-
     assert {:error, %Ecto.Changeset{} = invalid} =
-             Events.update_event(ctx.host, cancelled, %{title: "新一期活动"})
+             Events.update_event(ctx.host, cancelled, %{})
 
     assert Keyword.has_key?(invalid.errors, :application_deadline)
     assert Repo.get!(Event, event.id).round == 1
@@ -251,17 +244,20 @@ defmodule Rice.EventsTest do
     assert reopened.status == "open"
   end
 
-  test "旧活动缺少收款社区时空更新不会重新开放", ctx do
+  test "旧活动缺少收款社区时空更新也会重开空白新一期", ctx do
     event = event!(ctx)
     {:ok, cancelled} = Events.cancel(ctx.host, event)
     legacy = Repo.update!(Ecto.Changeset.change(cancelled, settlement_node_id: nil))
     history_count = Repo.aggregate(EventHistory, :count)
+    receipt_count = Repo.aggregate(Rice.Grains.Receipt, :count)
 
-    assert {:ok, unchanged} = Events.update_event(ctx.host, legacy, %{})
-    assert unchanged.status == "cancelled"
-    assert unchanged.round == 1
-    assert unchanged.settlement_node_id == nil
-    assert Repo.aggregate(EventHistory, :count) == history_count
+    assert {:ok, reopened} = Events.update_event(ctx.host, legacy, %{})
+    assert reopened.status == "open"
+    assert reopened.round == 2
+    assert reopened.settlement_node_id == ctx.node.id
+    assert reopened.applications == []
+    assert Repo.aggregate(EventHistory, :count) == history_count + 1
+    assert Repo.aggregate(Rice.Grains.Receipt, :count) == receipt_count
   end
 
   test "换社区重开后新社区管理员不能查看旧期私人申请", ctx do

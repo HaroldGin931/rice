@@ -190,19 +190,19 @@ defmodule Rice.Tasks do
       task = Repo.preload(task, :image_links)
       node_id = attrs["node_id"] || attrs[:node_id] || task.node_id
 
-      with :ok <- require_edit_node(user, task.node_id, node_id),
-           changeset <-
+      with changeset <-
              task
              |> Task.create_changeset(attrs, published_edit: true)
              |> Ecto.Changeset.put_change(:node_id, node_id)
-             |> validate_active_reward_edit(task)
+             |> validate_active_terms_edit(task)
              |> validate_reopen_schedule(task),
-           {:ok, _} <- Ecto.Changeset.apply_action(changeset, :update) do
+           {:ok, _} <- Ecto.Changeset.apply_action(changeset, :update),
+           :ok <- require_edit_node(user, task.node_id, node_id) do
         before = task_snapshot(task)
         amount = Ecto.Changeset.get_field(changeset, :reward_amount)
         application_deadline = Ecto.Changeset.get_field(changeset, :application_deadline)
 
-        reopening? = task.status in ~w(expired cancelled) and changeset.changes != %{}
+        reopening? = task.status in ~w(expired cancelled)
 
         expiring? =
           task.status == "open" and not is_nil(application_deadline) and
@@ -223,12 +223,8 @@ defmodule Rice.Tasks do
               deadline -> DateTime.compare(deadline, DateTime.utc_now()) == :gt
             end
 
-        with {:ok, changeset} <-
-               if(task.status in ~w(expired cancelled) and not reopening?,
-                 do: stage_terminal_payer(task, changeset, node_id),
-                 else: revise_reward(task, changeset, amount, node_id, reopening?)
-               ),
-             {:ok, changeset} <- expire_edited_task(task, changeset, expiring?, amount, node_id),
+        with {:ok, changeset} <- revise_reward(task, changeset, amount, node_id, reopening?),
+             {:ok, changeset} <- expire_edited_task(task, changeset, expiring?),
              :ok <- maybe_begin_next_round(task, reopening?),
              changeset <-
                changeset
@@ -271,29 +267,30 @@ defmodule Rice.Tasks do
     end
   end
 
-  defp validate_active_reward_edit(changeset, %Task{status: status})
+  defp validate_active_terms_edit(changeset, %Task{status: status})
        when status in ~w(open in_progress overdue under_review) do
-    if Ecto.Changeset.changed?(changeset, :reward_amount),
-      do: Ecto.Changeset.add_error(changeset, :reward_amount, "已发布任务不能修改稻米报酬"),
+    changeset =
+      if Ecto.Changeset.changed?(changeset, :reward_amount),
+        do: Ecto.Changeset.add_error(changeset, :reward_amount, "已发布任务不能修改稻米报酬"),
+        else: changeset
+
+    if Ecto.Changeset.changed?(changeset, :node_id),
+      do: Ecto.Changeset.add_error(changeset, :node_id, "已发布任务不能修改所属社区"),
       else: changeset
   end
 
-  defp validate_active_reward_edit(changeset, _task), do: changeset
+  defp validate_active_terms_edit(changeset, _task), do: changeset
 
   defp validate_reopen_schedule(changeset, %Task{status: status})
        when status in ~w(expired cancelled) do
-    if changeset.changes == %{} do
-      changeset
-    else
-      case Ecto.Changeset.get_field(changeset, :application_deadline) do
-        nil ->
-          Ecto.Changeset.add_error(changeset, :application_deadline, "重新开放需要将来的申请截止时间")
+    case Ecto.Changeset.get_field(changeset, :application_deadline) do
+      nil ->
+        Ecto.Changeset.add_error(changeset, :application_deadline, "重新开放需要将来的申请截止时间")
 
-        deadline ->
-          if DateTime.compare(deadline, DateTime.utc_now()) == :gt,
-            do: changeset,
-            else: Ecto.Changeset.add_error(changeset, :application_deadline, "重新开放需要将来的申请截止时间")
-      end
+      deadline ->
+        if DateTime.compare(deadline, DateTime.utc_now()) == :gt,
+          do: changeset,
+          else: Ecto.Changeset.add_error(changeset, :application_deadline, "重新开放需要将来的申请截止时间")
     end
   end
 
@@ -319,20 +316,16 @@ defmodule Rice.Tasks do
   defp maybe_advance_round(changeset, round, true),
     do: Ecto.Changeset.put_change(changeset, :round, round + 1)
 
-  defp expire_edited_task(_task, changeset, false, _amount, _node_id), do: {:ok, changeset}
+  defp expire_edited_task(_task, changeset, false), do: {:ok, changeset}
 
-  defp expire_edited_task(task, changeset, true, amount, node_id) do
+  defp expire_edited_task(task, changeset, true) do
     case maybe_refund_edited_reward(task) do
       {:ok, _} ->
         {:ok,
-         changeset
-         |> Ecto.Changeset.put_change(
+         Ecto.Changeset.put_change(
+           changeset,
            :reward_status,
-           if(amount > 0 and task.reward_status == "reserved", do: "refunded", else: "none")
-         )
-         |> Ecto.Changeset.put_change(
-           :funding_node_id,
-           if(node_id == task.node_id, do: task.funding_node_id, else: node_id)
+           if(task.reward_status == "reserved", do: "refunded", else: "none")
          )}
 
       error ->
@@ -419,18 +412,13 @@ defmodule Rice.Tasks do
     do: {:ok, changeset}
 
   defp revise_reward(task, changeset, amount, node_id, true) do
-    old_account = reward_account(task)
-
     new_account =
       if node_id == task.node_id and
            (is_nil(task.funding_node_id) or task.funding_node_id == node_id),
-         do: old_account,
+         do: reward_account(task),
          else: {:node, node_id}
 
-    Grains.lock_business_accounts(Repo, [old_account, new_account])
-
-    with {:ok, _} <- maybe_refund_edited_reward(task),
-         {:ok, subject} <- maybe_reserve_edited_reward(new_account, amount, task.id) do
+    with {:ok, subject} <- maybe_reserve_edited_reward(new_account, amount, task.id) do
       {:ok,
        changeset
        |> Ecto.Changeset.put_change(
@@ -444,12 +432,6 @@ defmodule Rice.Tasks do
        |> Ecto.Changeset.put_change(:reward_subject_uri, subject)}
     end
   end
-
-  defp stage_terminal_payer(%Task{node_id: node_id}, changeset, node_id),
-    do: {:ok, changeset}
-
-  defp stage_terminal_payer(_task, changeset, node_id),
-    do: {:ok, Ecto.Changeset.put_change(changeset, :funding_node_id, node_id)}
 
   defp maybe_refund_edited_reward(%Task{reward_status: "reserved", reward_amount: amount} = task)
        when amount > 0,
