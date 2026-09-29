@@ -93,7 +93,9 @@ defmodule Rice.Tasks do
   defp authorize_management(task, user),
     do: if(can_manage?(task, user), do: :ok, else: {:error, :forbidden})
 
-  def can_edit?(%Task{creator_id: id, node_id: node_id}, %User{id: id} = user),
+  def can_edit?(%Task{status: "draft"} = task, user), do: can_manage?(task, user)
+
+  def can_edit?(%Task{node_id: node_id}, %User{} = user),
     do: Rice.Community.admin?(Repo.get(Rice.Community.Node, node_id), user)
 
   def can_edit?(_, _), do: false
@@ -192,7 +194,7 @@ defmodule Rice.Tasks do
 
       with changeset <-
              task
-             |> Task.create_changeset(attrs, published_edit: true)
+             |> Task.create_changeset(attrs, published_edit: true, editing_user_id: user.id)
              |> Ecto.Changeset.put_change(:node_id, node_id)
              |> validate_active_terms_edit(task)
              |> validate_reopen_schedule(task),
@@ -256,7 +258,7 @@ defmodule Rice.Tasks do
             end
 
           with {:ok, _} <- history,
-               :ok <- maybe_notify_edited_due(task, saved, expiring?, overdue?) do
+               :ok <- maybe_notify_edited_due(task, saved, user.id, expiring?, overdue?) do
             {:ok, preload_detail(saved)}
           end
         end
@@ -388,9 +390,9 @@ defmodule Rice.Tasks do
 
   defp previous_submission_status(_task, _submission), do: "pending"
 
-  defp maybe_notify_edited_due(_old, _saved, false, false), do: :ok
+  defp maybe_notify_edited_due(_old, _saved, _actor_id, false, false), do: :ok
 
-  defp maybe_notify_edited_due(old, saved, expiring?, overdue?) do
+  defp maybe_notify_edited_due(old, saved, actor_id, expiring?, overdue?) do
     recipients =
       cond do
         expiring? ->
@@ -401,7 +403,7 @@ defmodule Rice.Tasks do
       end
 
     Enum.reduce_while(recipients, :ok, fn {recipient_id, event, detail}, _ ->
-      case Repo.insert(notification_changeset(saved, recipient_id, old.creator_id, event, detail)) do
+      case Repo.insert(notification_changeset(saved, recipient_id, actor_id, event, detail)) do
         {:ok, _} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -412,22 +414,10 @@ defmodule Rice.Tasks do
     do: {:ok, changeset}
 
   defp revise_reward(task, changeset, amount, node_id, true) do
-    new_account =
-      if node_id == task.node_id and
-           (is_nil(task.funding_node_id) or task.funding_node_id == node_id),
-         do: reward_account(task),
-         else: {:node, node_id}
-
-    with {:ok, subject} <- maybe_reserve_edited_reward(new_account, amount, task.id) do
+    with {:ok, subject} <- maybe_reserve_edited_reward({:node, node_id}, amount, task.id) do
       {:ok,
        changeset
-       |> Ecto.Changeset.put_change(
-         :funding_node_id,
-         case new_account do
-           {:node, id} -> id
-           _ -> nil
-         end
-       )
+       |> Ecto.Changeset.put_change(:funding_node_id, node_id)
        |> Ecto.Changeset.put_change(:reward_status, if(amount > 0, do: "reserved", else: "none"))
        |> Ecto.Changeset.put_change(:reward_subject_uri, subject)}
     end
@@ -1008,7 +998,7 @@ defmodule Rice.Tasks do
   defp private_viewer?(_task, nil), do: false
 
   defp private_viewer?(task, %User{id: id} = user) do
-    task.creator_id == id or can_manage?(task, user) or
+    task.creator_id == id or can_manage?(task, user) or can_edit?(task, user) or
       Repo.exists?(from a in Application, where: a.task_id == ^task.id and a.user_id == ^id)
   end
 
@@ -1157,7 +1147,7 @@ defmodule Rice.Tasks do
     from t in query,
       where:
         t.creator_id == ^id or
-          (t.status != "draft" and not is_nil(t.funding_node_id) and t.node_id in ^ids)
+          (t.status != "draft" and t.node_id in ^ids)
   end
 
   defp scope_mine(query, %User{id: id}, "assigned") do

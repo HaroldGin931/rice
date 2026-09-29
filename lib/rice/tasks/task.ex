@@ -61,7 +61,7 @@ defmodule Rice.Tasks.Task do
     |> unique_constraint([:creator_id, :client_request_id])
     |> validate_future_deadline(opts)
     |> unique_constraint(:creator_id, name: :tasks_one_draft_per_creator)
-    |> Rice.Files.put_images(attrs, task.creator_id)
+    |> Rice.Files.put_images(attrs, Keyword.get(opts, :editing_user_id, task.creator_id))
   end
 
   def appointment_changeset(task, attrs) do

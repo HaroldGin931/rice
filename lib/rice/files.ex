@@ -6,7 +6,7 @@ defmodule Rice.Files do
   落盘路径只由 TSID 决定,**任何时候都不把用户提供的文件名拼进路径** ——
   原始文件名只在下载时的 `Content-Disposition` 里出现。
 
-  上传需要认证；任务与活动只能引用发布者自己上传的图片。
+  上传需要认证；新增业务图片须由操作者上传，已有图片可继续引用。
   """
   import Ecto.Query
 
@@ -114,21 +114,26 @@ defmodule Rice.Files do
           is_list(ids) and length(ids) <= 9 and Enum.all?(ids, &Rice.Tsid.valid?/1) and
             length(Enum.uniq(ids)) == length(ids)
 
-        if valid? and owned_images?(ids, user_id) do
+        if valid? do
           data = Repo.preload(changeset.data, :image_links)
           existing = Map.new(data.image_links, &{&1.attachment_id, &1})
+          new_ids = Enum.reject(ids, &Map.has_key?(existing, &1))
 
-          links =
-            ids
-            |> Enum.with_index()
-            |> Enum.map(fn {id, position} ->
-              link = Map.get(existing, id) || Ecto.build_assoc(data, :image_links)
-              Ecto.Changeset.change(link, attachment_id: id, position: position)
-            end)
+          if owned_images?(new_ids, user_id) do
+            links =
+              ids
+              |> Enum.with_index()
+              |> Enum.map(fn {id, position} ->
+                link = Map.get(existing, id) || Ecto.build_assoc(data, :image_links)
+                Ecto.Changeset.change(link, attachment_id: id, position: position)
+              end)
 
-          Ecto.Changeset.put_assoc(%{changeset | data: data}, :image_links, links)
+            Ecto.Changeset.put_assoc(%{changeset | data: data}, :image_links, links)
+          else
+            Ecto.Changeset.add_error(changeset, :attachment_ids, "最多选择9张本人上传或当前内容已有的有效图片，不能重复")
+          end
         else
-          Ecto.Changeset.add_error(changeset, :attachment_ids, "最多选择9张本人上传的有效图片，不能重复")
+          Ecto.Changeset.add_error(changeset, :attachment_ids, "最多选择9张本人上传或当前内容已有的有效图片，不能重复")
         end
     end
   end

@@ -107,6 +107,52 @@ defmodule Rice.EventsTest do
     assert Rice.Grains.reconcile().ok?
   end
 
+  test "同社区管理员可编辑已发布活动并以本人署名，草稿和撤权受限", ctx do
+    editor = user_fixture()
+    outsider = user_fixture()
+    node_fixture(%{user_id: outsider.id})
+
+    membership =
+      Repo.insert!(
+        Rice.Community.Membership.changeset(%Rice.Community.Membership{
+          node_id: ctx.node.id,
+          user_id: editor.id,
+          role: "admin"
+        })
+      )
+
+    assert {:ok, draft} = Events.create_event(ctx.host, attrs(ctx.node, %{status: "draft"}))
+    refute Events.can_edit?(draft, editor)
+    assert {:error, :forbidden} = Events.update_event(editor, draft, %{title: "越权草稿"})
+
+    assert {:ok, published} = Events.publish_draft(ctx.host, draft)
+    assert Events.can_edit?(published, editor)
+    assert {:error, :forbidden} = Events.update_event(outsider, published, %{title: "其他社区"})
+    assert {:ok, edited} = Events.update_event(editor, published, %{title: "管理员修订"})
+
+    [history] = Enum.filter(edited.history, &(&1.action == "edited"))
+    assert history.actor_id == editor.id
+    assert history.actor.nickname == editor.nickname
+    assert history.after["title"] == "管理员修订"
+
+    rendered = RiceWeb.Api.EventJSON.show(%{event: edited, current_user: editor}).data
+    [rendered_history] = Enum.filter(rendered.history, &(&1.action == "edited"))
+    assert rendered_history.actor.id == editor.id
+    assert rendered_history.actor.nickname == editor.nickname
+
+    legacy = Repo.update!(Ecto.Changeset.change(edited, settlement_node_id: nil))
+    assert {:ok, legacy_edited} = Events.update_event(editor, legacy, %{title: "旧个人出资活动"})
+    assert {:ok, cancelled} = Events.cancel(ctx.host, legacy_edited)
+    assert {:ok, reopened} = Events.update_event(editor, cancelled, %{title: "社区继续举办"})
+    assert reopened.status == "open"
+    assert reopened.settlement_node_id == ctx.node.id
+    assert Enum.any?(reopened.history, &(&1.actor_id == editor.id and &1.action == "edited"))
+
+    Repo.update!(Ecto.Changeset.change(membership, role: "member"))
+    refute Events.can_edit?(published, editor)
+    assert {:error, :forbidden} = Events.update_event(editor, published, %{title: "撤权后编辑"})
+  end
+
   test "报名截止已过时仍可只修正文案，不必重设旧时间", ctx do
     event = event!(ctx)
     past = DateTime.add(DateTime.utc_now(), -60)

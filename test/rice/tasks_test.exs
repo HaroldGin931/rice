@@ -561,6 +561,74 @@ defmodule Rice.TasksTest do
     assert Rice.Grains.reconcile().ok?
   end
 
+  test "同社区管理员可编辑已发布任务，编辑记录和到期通知记实际操作者" do
+    publisher = task_publisher_fixture()
+    node = Repo.get_by!(Rice.Community.Node, user_id: publisher.id)
+    editor = user_fixture()
+    outsider = user_fixture()
+    worker = user_fixture()
+    node_fixture(%{user_id: outsider.id})
+
+    membership =
+      Repo.insert!(
+        Rice.Community.Membership.changeset(%Rice.Community.Membership{
+          node_id: node.id,
+          user_id: editor.id,
+          role: "admin"
+        })
+      )
+
+    assert {:ok, draft} =
+             Tasks.create_task(publisher, %{
+               status: "draft",
+               title: "原任务",
+               description: "原说明",
+               organizer_contact: "社区服务台"
+             })
+
+    refute Tasks.can_edit?(draft, editor)
+    assert {:error, :forbidden} = Tasks.update_task(editor, draft, %{title: "越权草稿"})
+
+    assert {:ok, published} = Tasks.publish_draft(publisher, draft)
+    assert Tasks.can_edit?(published, editor)
+    assert {:error, :forbidden} = Tasks.update_task(outsider, published, %{title: "其他社区"})
+    assert {:ok, edited} = Tasks.update_task(editor, published, %{title: "管理员修订"})
+
+    [history] = Enum.filter(edited.events, &(&1.before != nil))
+    assert history.actor_id == editor.id
+    assert history.actor.nickname == editor.nickname
+    assert history.after["title"] == "管理员修订"
+
+    rendered = RiceWeb.Api.TaskJSON.show(%{task: edited, current_user: editor}).data
+    [rendered_history] = Enum.filter(rendered.events, &(&1.action == "edited"))
+    assert rendered_history.actor.id == editor.id
+    assert rendered_history.actor.nickname == editor.nickname
+
+    assert {:ok, _} = Tasks.apply(worker, edited, %{contact: "测试联系方式"})
+
+    assert {:ok, expired} =
+             Tasks.update_task(editor, edited, %{
+               application_deadline: DateTime.add(DateTime.utc_now(), -60)
+             })
+
+    assert expired.status == "expired"
+
+    assert Repo.get_by!(Rice.Tasks.Notification,
+             task_id: published.id,
+             recipient_id: worker.id,
+             event: "task_expired"
+           ).actor_id == editor.id
+
+    legacy = task_fixture(publisher)
+
+    assert {:ok, %{title: "旧个人出资任务"}} =
+             Tasks.update_task(editor, legacy, %{title: "旧个人出资任务"})
+
+    Repo.update!(Ecto.Changeset.change(membership, role: "member"))
+    refute Tasks.can_edit?(expired, editor)
+    assert {:error, :forbidden} = Tasks.update_task(editor, expired, %{title: "撤权后编辑"})
+  end
+
   test "取消后即使不改字段，保存也会重新开放并冻结新一笔奖励" do
     publisher = task_publisher_fixture()
     node = funded_node_fixture(publisher, 100)
@@ -859,10 +927,21 @@ defmodule Rice.TasksTest do
     assert Rice.Grains.reconcile().ok?
   end
 
-  test "旧个人出资任务禁止修改奖励，取消时仍退回原发布者" do
+  test "旧个人出资任务旧轮退原发布者，新轮由社区出资" do
     publisher = task_publisher_fixture()
     node = Repo.get_by!(Rice.Community.Node, user_id: publisher.id)
-    {:ok, _} = Rice.Grains.grant(publisher, 100)
+    editor = user_fixture()
+
+    Repo.insert!(
+      Rice.Community.Membership.changeset(%Rice.Community.Membership{
+        node_id: node.id,
+        user_id: editor.id,
+        role: "admin"
+      })
+    )
+
+    {:ok, _} = Rice.Grains.grant(publisher, 200)
+    {:ok, _} = Rice.Grains.fund_node(publisher, node, 100, "legacy-next-round")
 
     task =
       %Rice.Tasks.Task{
@@ -908,6 +987,28 @@ defmodule Rice.TasksTest do
     assert %{balance: 100, frozen: 0} = Rice.Grains.wallet(publisher)
 
     assert Repo.get!(Rice.Community.Node, node.id).grain_frozen_balance == 0
+
+    assert {:ok, %{status: "cancelled"}} = Tasks.fetch_task(task.id, editor)
+
+    assert {:ok, reopened} =
+             Tasks.update_task(editor, cancelled, %{
+               title: "社区继续发布",
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    assert reopened.status == "open"
+    assert reopened.funding_node_id == node.id
+    assert %{balance: 100, frozen: 0} = Rice.Grains.wallet(publisher)
+
+    assert %{grain_balance: 60, grain_frozen_balance: 40} =
+             Repo.get!(Rice.Community.Node, node.id)
+
+    assert Repo.get_by!(Rice.Grains.Receipt,
+             subject_uri: reopened.reward_subject_uri,
+             kind: "reserved"
+           ).from_node_id == node.id
+
+    assert Enum.any?(reopened.events, &(&1.actor_id == editor.id and &1.before != nil))
     assert Rice.Grains.reconcile().ok?
   end
 

@@ -142,7 +142,9 @@ defmodule RiceWeb.Api.CommunityAdminTest do
         |> get(path, %{mine: "managed"})
         |> json_response(200)
 
-      assert Enum.sort(Enum.map(managed["data"], & &1["id"])) == Enum.sort([id, own["id"]])
+      assert Enum.sort(Enum.map(managed["data"], & &1["id"])) ==
+               Enum.sort([id, own["id"], legacy["id"]])
+
       refute inspect(managed) =~ "申请人私人电话"
 
       assert build_conn()

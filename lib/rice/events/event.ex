@@ -68,7 +68,7 @@ defmodule Rice.Events.Event do
     |> foreign_key_constraint(:creator_id)
     |> unique_constraint(:creator_id, name: :events_one_draft_per_creator)
     |> unique_constraint([:creator_id, :client_request_id])
-    |> Rice.Files.put_images(attrs, event.creator_id)
+    |> Rice.Files.put_images(attrs, Keyword.get(opts, :editing_user_id, event.creator_id))
   end
 
   def publish_changeset(event),

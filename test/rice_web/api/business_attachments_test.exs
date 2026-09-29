@@ -142,6 +142,72 @@ defmodule RiceWeb.Api.BusinessAttachmentsTest do
       assert image_ids(with_image) == [image["id"]]
       assert image_ids(create(@resource, token, attrs(@resource, node, "open"))) == []
     end
+
+    test "#{resource} 共同管理员编辑可保留原图并添加本人图片，不能引用未关联的他人图片" do
+      {host, host_token} = user_with_token()
+      {editor, editor_token} = user_with_token()
+      {_outsider, outsider_token} = user_with_token()
+      node = node_fixture(%{user_id: host.id})
+
+      Repo.insert!(
+        Rice.Community.Membership.changeset(%Rice.Community.Membership{
+          node_id: node.id,
+          user_id: editor.id,
+          role: "admin"
+        })
+      )
+
+      original = upload(host_token)
+      unlinked_host = upload(host_token)
+      editor_image = upload(editor_token)
+      unlinked_editor = upload(editor_token)
+      foreign = upload(outsider_token)
+
+      created =
+        create(
+          @resource,
+          host_token,
+          Map.put(attrs(@resource, node, "open"), :attachment_ids, [original["id"]])
+        )
+
+      path = "/api/#{@resource}/#{created["id"]}"
+
+      edited =
+        update(path, editor_token, %{attachment_ids: [original["id"], editor_image["id"]]})
+
+      assert image_ids(edited) == [original["id"], editor_image["id"]]
+      history = edited[if(@resource == "tasks", do: "events", else: "history")] |> List.last()
+      assert history["actor"]["id"] == editor.id
+      assert history["after"]["attachment_ids"] == [original["id"], editor_image["id"]]
+
+      for id <- [unlinked_host["id"], foreign["id"]] do
+        assert build_conn()
+               |> authed(editor_token)
+               |> patch(path, %{creator_id: host.id, attachment_ids: [original["id"], id]})
+               |> json_response(422)
+               |> get_in(["errors", "attachment_ids"])
+      end
+
+      assert image_ids(
+               update(path, host_token, %{attachment_ids: [editor_image["id"], original["id"]]})
+             ) ==
+               [editor_image["id"], original["id"]]
+
+      assert build_conn()
+             |> authed(host_token)
+             |> patch(path, %{attachment_ids: [editor_image["id"], unlinked_editor["id"]]})
+             |> json_response(422)
+
+      current = build_conn() |> get(path) |> json_response(200) |> Map.fetch!("data")
+      assert image_ids(current) == [editor_image["id"], original["id"]]
+
+      draft = create(@resource, host_token, attrs(@resource, node, "draft"))
+
+      assert build_conn()
+             |> authed(editor_token)
+             |> patch("/api/#{@resource}/#{draft["id"]}", %{attachment_ids: [editor_image["id"]]})
+             |> json_response(404)
+    end
   end
 
   defp create(resource, token, attrs),

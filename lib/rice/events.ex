@@ -30,7 +30,7 @@ defmodule Rice.Events do
           from e in Event,
             where:
               e.creator_id == ^user.id or
-                (e.status != "draft" and not is_nil(e.settlement_node_id) and e.node_id in ^ids)
+                (e.status != "draft" and e.node_id in ^ids)
 
         mine when mine in ["created", "applied", "managed"] and is_nil(user) ->
           where(query, [e], false)
@@ -223,7 +223,7 @@ defmodule Rice.Events do
 
     changeset =
       event
-      |> Event.changeset(attrs, published_edit: true)
+      |> Event.changeset(attrs, published_edit: true, editing_user_id: user.id)
       |> Changeset.put_change(:node_id, node_id)
       |> Changeset.put_change(
         :settlement_node_id,
@@ -739,7 +739,9 @@ defmodule Rice.Events do
 
   def can_manage?(event, user), do: Rice.Community.admin?(Repo.get(Node, event.node_id), user)
 
-  def can_edit?(%Event{creator_id: id, node_id: node_id}, %User{id: id} = user),
+  def can_edit?(%Event{status: "draft"} = event, user), do: can_manage?(event, user)
+
+  def can_edit?(%Event{node_id: node_id}, %User{} = user),
     do: Rice.Community.admin?(Repo.get(Node, node_id), user)
 
   def can_edit?(_, _), do: false
