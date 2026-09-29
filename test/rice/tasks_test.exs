@@ -467,6 +467,96 @@ defmodule Rice.TasksTest do
     assert mine.id == task.id
   end
 
+  test "已发布任务编辑保留旧约定和资金流水，失败的改价整体回滚" do
+    publisher = task_publisher_fixture()
+    first_node = funded_node_fixture(publisher, 100)
+    second_node = node_fixture(%{user_id: publisher.id})
+    {:ok, _} = Rice.Grains.grant(publisher, 80)
+    {:ok, _} = Rice.Grains.fund_node(publisher, second_node, 80, "edit-node-fund")
+    worker = user_fixture()
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               node_id: first_node.id,
+               title: "旧任务",
+               description: "旧说明",
+               organizer_contact: "旧联系方式",
+               reward_amount: 40
+             })
+
+    assert {:ok, _} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
+
+    assert {:ok, edited} =
+             Tasks.update_task(publisher, task, %{
+               node_id: second_node.id,
+               title: "新任务",
+               description: "新说明",
+               organizer_contact: "新联系方式",
+               reward_amount: 60
+             })
+
+    assert edited.id == task.id
+    assert edited.funding_node_id == second_node.id
+    assert edited.reward_amount == 60
+    assert length(edited.applications) == 1
+    [history] = Enum.filter(edited.events, &(&1.before != nil))
+    assert history.actor_id == publisher.id
+    assert history.before["title"] == "旧任务"
+    assert history.after["title"] == "新任务"
+    assert history.before["reward_amount"] == 40
+    assert history.after["reward_amount"] == 60
+    assert history.before["funding_node_id"] == first_node.id
+    assert history.after["funding_node_id"] == second_node.id
+    assert history.before["node_name"] == first_node.name
+    assert history.after["node_name"] == second_node.name
+    assert history.before["attachment_ids"] == []
+
+    old_uri = "rice://tasks/#{task.id}"
+    new_uri = edited.reward_subject_uri
+    assert new_uri != old_uri
+    assert Repo.get_by!(Rice.Grains.Receipt, subject_uri: old_uri, kind: "reserved").amount == 40
+    assert Repo.get_by!(Rice.Grains.Receipt, subject_uri: old_uri, kind: "refunded").amount == 40
+    assert Repo.get_by!(Rice.Grains.Receipt, subject_uri: new_uri, kind: "reserved").amount == 60
+    assert {:ok, _} = Tasks.update_task(publisher, edited, %{title: "新任务"})
+    assert {:error, :forbidden} = Tasks.update_task(worker, edited, %{title: "不能修改"})
+    assert Repo.aggregate(from(e in Rice.Tasks.Event, where: not is_nil(e.before)), :count) == 1
+
+    assert {:error, :insufficient_balance} =
+             Tasks.update_task(publisher, edited, %{reward_amount: 200})
+
+    assert Repo.get!(Rice.Tasks.Task, task.id).reward_subject_uri == new_uri
+    assert Repo.aggregate(from(e in Rice.Tasks.Event, where: not is_nil(e.before)), :count) == 1
+    assert is_nil(Repo.get_by(Rice.Grains.Receipt, subject_uri: new_uri, kind: "refunded"))
+
+    assert {:ok, cancelled} = Tasks.cancel(publisher, edited)
+    assert {:error, :conflict} = Tasks.update_task(publisher, cancelled, %{title: "终态不能修改"})
+    assert Repo.get_by!(Rice.Grains.Receipt, subject_uri: new_uri, kind: "refunded").amount == 60
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "申请截止已过时仍可只修正文案，不必重设旧时间" do
+    publisher = task_publisher_fixture()
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "原任务",
+               description: "原说明",
+               organizer_contact: "社区服务台",
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    past = DateTime.add(DateTime.utc_now(), -60)
+    Repo.update!(change(task, application_deadline: past))
+    assert {:ok, edited} = Tasks.update_task(publisher, task, %{title: "修正后的任务"})
+    assert edited.title == "修正后的任务"
+    assert edited.application_deadline == past
+
+    assert {:error, changeset} =
+             Tasks.update_task(publisher, edited, %{application_deadline: DateTime.add(past, -60)})
+
+    assert "领取截止时间必须在将来" in errors_on(changeset).application_deadline
+  end
+
   test "申请截止未任命即失效并退款，24小时后只保留私有历史" do
     publisher = task_publisher_fixture()
     worker = user_fixture()

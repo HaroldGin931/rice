@@ -24,7 +24,7 @@ defmodule RiceWeb.Api.EventController do
   end
 
   def update(conn, %{"event_id" => id} = params),
-    do: change(conn, id, &Events.update_draft(&1, &2, params))
+    do: change(conn, id, &Events.update_event(&1, &2, params))
 
   def publish(conn, %{"event_id" => id}), do: change(conn, id, &Events.publish_draft/2)
   def cancel(conn, %{"event_id" => id}), do: change(conn, id, &Events.cancel/2)

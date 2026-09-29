@@ -62,10 +62,12 @@ defmodule RiceWeb.Api.BusinessAttachmentsTest do
         refute inspect(data["attachments"]) =~ "user_id"
       end
 
-      assert build_conn()
-             |> authed(token)
-             |> patch(path, %{attachment_ids: []})
-             |> json_response(409)
+      edited = update(path, token, %{attachment_ids: []})
+      assert image_ids(edited) == []
+
+      history = edited[if(@resource == "tasks", do: "events", else: "history")]
+      assert List.last(history)["before"]["attachment_ids"] == ids
+      assert List.last(history)["after"]["attachment_ids"] == []
     end
 
     test "#{resource} 拒绝他人、非图片、无文件、无效、重复及超过九张的附件且保存原子化" do

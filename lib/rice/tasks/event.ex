@@ -6,6 +6,8 @@ defmodule Rice.Tasks.Event do
     field(:from_status, :string)
     field(:to_status, :string)
     field(:detail, :string)
+    field(:before, :map)
+    field(:after, :map)
 
     belongs_to(:task, Rice.Tasks.Task)
     belongs_to(:actor, Rice.Accounts.User)
@@ -15,7 +17,7 @@ defmodule Rice.Tasks.Event do
 
   def create_changeset(event, attrs) do
     event
-    |> cast(attrs, [:task_id, :actor_id, :from_status, :to_status, :detail])
+    |> cast(attrs, [:task_id, :actor_id, :from_status, :to_status, :detail, :before, :after])
     |> validate_required([:task_id, :to_status])
     |> update_change(:detail, &optional_trim/1)
     |> validate_length(:detail, max: 512)

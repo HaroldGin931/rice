@@ -19,6 +19,7 @@ defmodule Rice.Tasks.Task do
     field(:appointment_reason, :string)
     field(:reward_amount, :integer, default: 0)
     field(:reward_status, :string, default: "none")
+    field(:reward_subject_uri, :string)
     field(:search_cursor, :string, virtual: true)
 
     belongs_to(:creator, Rice.Accounts.User)
@@ -32,7 +33,7 @@ defmodule Rice.Tasks.Task do
   end
 
   @doc "发布者只能提交任务内容；身份与状态由服务端填写。"
-  def create_changeset(task, attrs) do
+  def create_changeset(task, attrs, opts \\ []) do
     task
     |> cast(attrs, [
       :title,
@@ -53,11 +54,11 @@ defmodule Rice.Tasks.Task do
     |> validate_length(:title, min: 1, max: 128)
     |> validate_length(:description, min: 1, max: 4000)
     |> validate_number(:reward_amount, greater_than_or_equal_to: 0)
-    |> validate_execution_deadline()
+    |> validate_execution_deadline(opts)
     |> validate_length(:requirement, max: 4000)
     |> validate_length(:client_request_id, max: 128)
     |> unique_constraint([:creator_id, :client_request_id])
-    |> validate_future_deadline()
+    |> validate_future_deadline(opts)
     |> unique_constraint(:creator_id, name: :tasks_one_draft_per_creator)
     |> Rice.Files.put_images(attrs, task.creator_id)
   end
@@ -73,8 +74,8 @@ defmodule Rice.Tasks.Task do
     task
     |> change()
     |> validate_required([:organizer_contact])
-    |> validate_future_deadline()
-    |> validate_execution_deadline()
+    |> validate_future_deadline([])
+    |> validate_execution_deadline([])
   end
 
   defp validate_organizer_contact(changeset) do
@@ -83,12 +84,14 @@ defmodule Rice.Tasks.Task do
       else: validate_required(changeset, [:organizer_contact])
   end
 
-  defp validate_execution_deadline(changeset) do
+  defp validate_execution_deadline(changeset, opts) do
     deadline = get_field(changeset, :execution_deadline)
     application = get_field(changeset, :application_deadline)
 
     if deadline &&
-         (DateTime.compare(deadline, DateTime.utc_now()) != :gt ||
+         (((not Keyword.get(opts, :published_edit, false) or
+              changed?(changeset, :execution_deadline)) and
+             DateTime.compare(deadline, DateTime.utc_now()) != :gt) ||
             (application && DateTime.compare(deadline, application) != :gt)),
        do: add_error(changeset, :execution_deadline, "交付时间须晚于现在及申请截止时间"),
        else: changeset
@@ -108,15 +111,17 @@ defmodule Rice.Tasks.Task do
 
   defp optional_trim(_), do: nil
 
-  defp validate_future_deadline(changeset) do
+  defp validate_future_deadline(changeset, opts) do
     case get_field(changeset, :application_deadline) do
       nil ->
         changeset
 
       deadline ->
-        if DateTime.compare(deadline, DateTime.utc_now()) == :gt,
-          do: changeset,
-          else: add_error(changeset, :application_deadline, "领取截止时间必须在将来")
+        if (Keyword.get(opts, :published_edit, false) and
+              not changed?(changeset, :application_deadline)) or
+             DateTime.compare(deadline, DateTime.utc_now()) == :gt,
+           do: changeset,
+           else: add_error(changeset, :application_deadline, "领取截止时间必须在将来")
     end
   end
 end

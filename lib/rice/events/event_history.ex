@@ -6,6 +6,8 @@ defmodule Rice.Events.EventHistory do
     field :action, :string
     field :from_status, :string
     field :to_status, :string
+    field :before, :map
+    field :after, :map
     belongs_to :event, Rice.Events.Event
     belongs_to :application, Rice.Events.Application
     belongs_to :actor, Rice.Accounts.User

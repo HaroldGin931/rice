@@ -188,6 +188,88 @@ defmodule Rice.Events do
     end)
   end
 
+  def update_event(user, event, attrs) do
+    attrs = stringify(attrs)
+
+    with_event(event.id, fn current ->
+      if current.status == "draft" do
+        require_host!(user, current)
+        node_id = attrs["node_id"] || current.node_id
+        require_node!(user, node_id)
+
+        current
+        |> Event.changeset(attrs)
+        |> Changeset.put_change(:node_id, node_id)
+        |> Changeset.put_change(:settlement_node_id, node_id)
+        |> Repo.update()
+        |> unwrap!()
+      else
+        update_published!(user, current, attrs)
+      end
+    end)
+  end
+
+  defp update_published!(user, event, attrs) do
+    require!(can_edit?(event, user), :forbidden)
+    require!(event.status in ["open", "in_progress"])
+    event = Repo.preload(event, :image_links)
+    node_id = attrs["node_id"] || event.node_id
+    if node_id != event.node_id, do: require_node!(user, node_id)
+
+    changeset =
+      event
+      |> Event.changeset(attrs, published_edit: true)
+      |> Changeset.put_change(:node_id, node_id)
+      |> Changeset.put_change(:settlement_node_id, node_id)
+
+    unwrap!(Changeset.apply_action(changeset, :update))
+
+    approved =
+      Repo.aggregate(
+        from(a in Application, where: a.event_id == ^event.id and a.status == "approved"),
+        :count
+      )
+
+    require!(approved <= Changeset.get_field(changeset, :capacity), :capacity_full)
+    before = event_snapshot(event)
+    saved = changeset |> Repo.update() |> unwrap!() |> Repo.preload(:image_links, force: true)
+    after_snapshot = event_snapshot(saved)
+
+    if before != after_snapshot do
+      unwrap!(
+        Repo.insert(%EventHistory{
+          event_id: event.id,
+          actor_id: user.id,
+          action: "edited",
+          from_status: event.status,
+          to_status: event.status,
+          before: before,
+          after: after_snapshot
+        })
+      )
+    end
+
+    saved
+  end
+
+  defp event_snapshot(event) do
+    %{
+      "node_id" => event.node_id,
+      "node_name" => Repo.get!(Node, event.node_id).name,
+      "title" => event.title,
+      "description" => event.description,
+      "organizer_contact" => event.organizer_contact,
+      "location" => event.location,
+      "application_deadline" => event.application_deadline,
+      "starts_at" => event.starts_at,
+      "ends_at" => event.ends_at,
+      "fee_amount" => event.fee_amount,
+      "capacity" => event.capacity,
+      "settlement_node_id" => event.settlement_node_id,
+      "attachment_ids" => Enum.map(event.image_links, & &1.attachment_id)
+    }
+  end
+
   def publish_draft(user, event) do
     with_event(event.id, fn current ->
       require_host!(user, current)
@@ -235,6 +317,7 @@ defmodule Rice.Events do
                   event_id: current.id,
                   user_id: user.id,
                   fee_amount: current.fee_amount,
+                  settlement_node_id: current.settlement_node_id,
                   payment_status: if(current.fee_amount > 0, do: "reserved", else: "none")
                 },
                 attrs
@@ -346,14 +429,13 @@ defmodule Rice.Events do
         now = DateTime.utc_now()
         require!(current.status in ["open", "in_progress"] and not before?(now, current.ends_at))
         # Acquire all relevant account locks in order before refunds and settlement.
-        recipient =
-          if current.settlement_node_id,
-            do: {:node, current.settlement_node_id},
-            else: current.creator_id
+        applications = active_applications(current)
 
-        Grains.lock_business_accounts(Repo, [
-          recipient | Enum.map(active_applications(current), & &1.user_id)
-        ])
+        Grains.lock_business_accounts(
+          Repo,
+          Enum.map(applications, & &1.user_id) ++
+            Enum.map(applications, &settlement_account(current, &1))
+        )
 
         current = start_locked!(current, now)
 
@@ -373,7 +455,7 @@ defmodule Rice.Events do
               Grains.settle_business(
                 Repo,
                 application.user_id,
-                recipient,
+                settlement_account(current, application),
                 application.fee_amount,
                 subject(application)
               )
@@ -419,7 +501,7 @@ defmodule Rice.Events do
     own = Enum.find(event.applications, &(&1.user_id == user.id))
 
     [
-      {"edit", host? and event.status == "draft"},
+      {"edit", can_edit?(event, user) and event.status in ["draft", "open", "in_progress"]},
       {"publish", host? and event.status == "draft"},
       {"cancel", host? and event.status in ["draft", "open", "in_progress"]},
       {"finish",
@@ -587,6 +669,11 @@ defmodule Rice.Events do
 
   def can_manage?(event, user), do: Rice.Community.admin?(Repo.get(Node, event.node_id), user)
 
+  def can_edit?(%Event{creator_id: id, node_id: node_id}, %User{id: id} = user),
+    do: Rice.Community.admin?(Repo.get(Node, node_id), user)
+
+  def can_edit?(_, _), do: false
+
   defp require_host!(user, event), do: require!(can_manage?(event, user), :forbidden)
 
   defp require_node!(user, node_id) do
@@ -605,6 +692,8 @@ defmodule Rice.Events do
   defp unwrap!({:error, reason}), do: Repo.rollback(reason)
   defp before?(time, other), do: DateTime.compare(time, other) == :lt
   defp subject(application), do: "rice://event_applications/#{application.id}"
+  defp settlement_account(_event, %{settlement_node_id: id}) when not is_nil(id), do: {:node, id}
+  defp settlement_account(event, _application), do: event.creator_id
   defp stringify(attrs), do: Map.new(attrs, fn {key, value} -> {to_string(key), value} end)
 
   defp change_event!(event, actor, action, status, attrs \\ []) do

@@ -72,6 +72,7 @@ defmodule RiceWeb.Api.EventJSON do
         status: item.status,
         payment_status: item.payment_status,
         fee_amount: item.fee_amount,
+        settlement_node_id: item.settlement_node_id,
         allowed_actions: Events.application_actions(event, item, user),
         inserted_at: item.inserted_at,
         updated_at: item.updated_at
@@ -84,6 +85,8 @@ defmodule RiceWeb.Api.EventJSON do
       action: item.action,
       from_status: item.from_status,
       to_status: item.to_status,
+      before: item.before,
+      after: item.after,
       actor: if(item.actor, do: UserJSON.public(item.actor)),
       inserted_at: item.inserted_at
     }

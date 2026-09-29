@@ -1,5 +1,5 @@
 defmodule Rice.Events.Event do
-  @moduledoc "社区活动；仅草稿可改约定，开始由系统推进，结束由主办方确认。"
+  @moduledoc "社区活动；开始由系统推进，结束由主办方确认。"
   use Rice.Schema
 
   schema "events" do
@@ -24,7 +24,7 @@ defmodule Rice.Events.Event do
     timestamps()
   end
 
-  def changeset(event, attrs) do
+  def changeset(event, attrs, opts \\ []) do
     event
     |> cast(attrs, [
       :title,
@@ -62,7 +62,7 @@ defmodule Rice.Events.Event do
       less_than_or_equal_to: 2_147_483_647
     )
     |> validate_number(:capacity, greater_than: 0, less_than_or_equal_to: 100_000)
-    |> validate_times()
+    |> validate_times(opts)
     |> foreign_key_constraint(:node_id)
     |> foreign_key_constraint(:creator_id)
     |> unique_constraint(:creator_id, name: :events_one_draft_per_creator)
@@ -71,7 +71,7 @@ defmodule Rice.Events.Event do
   end
 
   def publish_changeset(event),
-    do: event |> change() |> validate_required([:organizer_contact]) |> validate_times()
+    do: event |> change() |> validate_required([:organizer_contact]) |> validate_times([])
 
   defp validate_organizer_contact(changeset) do
     if get_field(changeset, :status) == "draft",
@@ -79,14 +79,17 @@ defmodule Rice.Events.Event do
       else: validate_required(changeset, [:organizer_contact])
   end
 
-  defp validate_times(changeset) do
+  defp validate_times(changeset, opts) do
     deadline = get_field(changeset, :application_deadline)
     starts = get_field(changeset, :starts_at)
     ends = get_field(changeset, :ends_at)
 
     changeset
     |> require_time(
-      is_nil(deadline) or DateTime.compare(deadline, DateTime.utc_now()) == :gt,
+      is_nil(deadline) or
+        (Keyword.get(opts, :published_edit, false) and
+           not Map.has_key?(changeset.changes, :application_deadline)) or
+        DateTime.compare(deadline, DateTime.utc_now()) == :gt,
       :application_deadline,
       "报名截止时间必须在将来"
     )

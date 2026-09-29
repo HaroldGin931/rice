@@ -8,6 +8,7 @@ defmodule Rice.Events.Application do
     field :status, :string, default: "pending"
     field :payment_status, :string, default: "none"
     field :fee_amount, :integer, default: 0
+    belongs_to :settlement_node, Rice.Community.Node
     belongs_to :event, Rice.Events.Event
     belongs_to :user, Rice.Accounts.User
     timestamps()

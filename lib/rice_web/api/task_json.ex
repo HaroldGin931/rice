@@ -128,7 +128,9 @@ defmodule RiceWeb.Api.TaskJSON do
     |> Enum.filter(fn e ->
       e.detail != "收到任务申请" || manager? || (user && user.id == e.actor_id)
     end)
-    |> Enum.filter(fn e -> private? || e.from_status != e.to_status || e.detail == "申请已截止" end)
+    |> Enum.filter(fn e ->
+      private? || e.from_status != e.to_status || e.detail == "申请已截止" || e.before != nil
+    end)
     |> Enum.map(fn e ->
       rendered = event(e)
       if private?, do: rendered, else: %{rendered | detail: nil}
@@ -144,6 +146,9 @@ defmodule RiceWeb.Api.TaskJSON do
       from_status: event.from_status,
       to_status: event.to_status,
       detail: event.detail,
+      action: if(event.before, do: "edited"),
+      before: event.before,
+      after: event.after,
       actor: public_user(event.actor),
       inserted_at: event.inserted_at
     }
@@ -160,6 +165,11 @@ defmodule RiceWeb.Api.TaskJSON do
 
     []
     |> maybe_add(task.status == "draft" and manager?, "publish")
+    |> maybe_add(
+      task.status in ~w(draft open in_progress overdue under_review) and
+        Rice.Tasks.can_edit?(task, user),
+      "edit"
+    )
     |> maybe_add(
       task.status == "open" and not past?(task.application_deadline) and
         task.creator_id != user_id and not manager? and

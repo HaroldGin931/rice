@@ -34,7 +34,7 @@ defmodule RiceWeb.Api.TaskController do
   end
 
   def update(conn, %{"task_id" => task_id} = params),
-    do: change(conn, task_id, &Tasks.update_draft(&1, &2, params))
+    do: change(conn, task_id, &Tasks.update_task(&1, &2, params))
 
   def apply(conn, %{"task_id" => task_id} = params) do
     with {:ok, task} <- Tasks.fetch_task(task_id, conn.assigns.current_user),

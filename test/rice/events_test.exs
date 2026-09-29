@@ -51,6 +51,73 @@ defmodule Rice.EventsTest do
     assert Rice.Grains.reconcile().ok?
   end
 
+  test "已发布活动编辑保留旧报名费和结算社区，并记录改动", ctx do
+    second_node = node_fixture(%{user_id: ctx.host.id})
+    event = event!(ctx, %{capacity: 2})
+    assert {:ok, event} = Events.apply(ctx.first, event, %{contact: "测试联系方式"})
+    first = application(event, ctx.first)
+
+    assert {:ok, edited} =
+             Events.update_event(ctx.host, event, %{
+               "node_id" => second_node.id,
+               "title" => "新活动",
+               "description" => "新的活动介绍",
+               "location" => "新地点",
+               "organizer_contact" => "新联系方式",
+               "fee_amount" => 30
+             })
+
+    assert edited.id == event.id
+    assert edited.node_id == second_node.id
+    assert edited.settlement_node_id == second_node.id
+    [history] = Enum.filter(edited.history, &(&1.action == "edited"))
+    assert history.actor_id == ctx.host.id
+    assert history.before["title"] == "社区活动"
+    assert history.after["title"] == "新活动"
+    assert history.before["fee_amount"] == 20
+    assert history.after["fee_amount"] == 30
+    assert history.before["attachment_ids"] == []
+    assert history.before["node_name"] == ctx.node.name
+    assert history.after["node_name"] == second_node.name
+    assert {:ok, _} = Events.update_event(ctx.host, edited, %{"title" => "新活动"})
+    assert {:error, :forbidden} = Events.update_event(ctx.first, edited, %{"title" => "不能修改"})
+    assert Repo.aggregate(from(h in EventHistory, where: h.action == "edited"), :count) == 1
+
+    assert {:ok, edited} = Events.apply(ctx.second, edited, %{contact: "测试联系方式"})
+    second = application(edited, ctx.second)
+    assert first.fee_amount == 20
+    assert Repo.get!(Application, first.id).settlement_node_id == ctx.node.id
+    assert second.fee_amount == 30
+    assert second.settlement_node_id == second_node.id
+    assert {:ok, edited} = Events.approve_application(ctx.host, edited, first.id)
+    assert {:ok, edited} = Events.approve_application(ctx.host, edited, second.id)
+    assert {:error, :capacity_full} = Events.update_event(ctx.host, edited, %{capacity: 1})
+
+    age_event!(edited)
+    assert {:ok, finished} = Events.finish(ctx.host, edited)
+    assert finished.status == "completed"
+    assert {:error, :conflict} = Events.update_event(ctx.host, finished, %{"title" => "终态不能修改"})
+    assert Repo.get!(Rice.Community.Node, ctx.node.id).grain_balance == 20
+    assert Repo.get!(Rice.Community.Node, second_node.id).grain_balance == 30
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "报名截止已过时仍可只修正文案，不必重设旧时间", ctx do
+    event = event!(ctx)
+    past = DateTime.add(DateTime.utc_now(), -60)
+    Repo.update!(change(event, application_deadline: past))
+    assert {:ok, edited} = Events.update_event(ctx.host, event, %{"title" => "修正后的活动"})
+    assert edited.title == "修正后的活动"
+    assert edited.application_deadline == past
+
+    assert {:error, changeset} =
+             Events.update_event(ctx.host, edited, %{
+               "application_deadline" => DateTime.add(past, -60)
+             })
+
+    assert "报名截止时间必须在将来" in errors_on(changeset).application_deadline
+  end
+
   test "收费和免费活动满员后拒绝新申请，释放名额后才恢复", ctx do
     for fee <- [1, 0] do
       event = event!(ctx, %{fee_amount: fee})

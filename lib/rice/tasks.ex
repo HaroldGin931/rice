@@ -93,6 +93,11 @@ defmodule Rice.Tasks do
   defp authorize_management(task, user),
     do: if(can_manage?(task, user), do: :ok, else: {:error, :forbidden})
 
+  def can_edit?(%Task{creator_id: id, node_id: node_id}, %User{id: id} = user),
+    do: Rice.Community.admin?(Repo.get(Rice.Community.Node, node_id), user)
+
+  def can_edit?(_, _), do: false
+
   defp publishing_node(user, nil) do
     ids = Rice.Community.managed_node_ids(user)
 
@@ -166,6 +171,122 @@ defmodule Rice.Tasks do
 
   def update_draft(user, task, attrs) do
     with_locked_task(task.id, &update_current_draft(user, &1, attrs))
+  end
+
+  def update_task(user, task, attrs) do
+    with_locked_task(task.id, fn current ->
+      if current.status == "draft",
+        do: update_current_draft(user, current, attrs),
+        else: update_current_published(user, current, attrs)
+    end)
+  end
+
+  defp update_current_published(user, task, attrs) do
+    with true <- can_edit?(task, user) or {:error, :forbidden},
+         true <- task.status in ~w(open in_progress overdue under_review) or {:error, :conflict} do
+      attrs = Map.drop(attrs, ["client_request_id", :client_request_id])
+      task = Repo.preload(task, :image_links)
+      node_id = attrs["node_id"] || attrs[:node_id] || task.node_id
+
+      with :ok <- require_edit_node(user, task.node_id, node_id),
+           changeset <-
+             task
+             |> Task.create_changeset(attrs, published_edit: true)
+             |> Ecto.Changeset.put_change(:node_id, node_id),
+           {:ok, _} <- Ecto.Changeset.apply_action(changeset, :update) do
+        before = task_snapshot(task)
+        amount = Ecto.Changeset.get_field(changeset, :reward_amount)
+        changed_reward? = amount != task.reward_amount or node_id != task.node_id
+
+        with {:ok, changeset} <- revise_reward(task, changeset, amount, node_id, changed_reward?),
+             {:ok, saved} <- Repo.update(changeset) do
+          saved = Repo.preload(saved, :image_links, force: true)
+          after_snapshot = task_snapshot(saved)
+
+          history =
+            if before != after_snapshot do
+              Repo.insert(
+                Event.create_changeset(%Event{}, %{
+                  task_id: task.id,
+                  actor_id: user.id,
+                  from_status: task.status,
+                  to_status: task.status,
+                  detail: "编辑了任务",
+                  before: before,
+                  after: after_snapshot
+                })
+              )
+            else
+              {:ok, nil}
+            end
+
+          with {:ok, _} <- history, do: {:ok, preload_detail(saved)}
+        end
+      end
+    else
+      false -> {:error, :conflict}
+      error -> error
+    end
+  end
+
+  defp revise_reward(_task, changeset, _amount, _node_id, false),
+    do: {:ok, changeset}
+
+  defp revise_reward(task, changeset, amount, node_id, true) do
+    old_account = reward_account(task)
+    new_account = {:node, node_id}
+    Grains.lock_business_accounts(Repo, [old_account, new_account])
+
+    with {:ok, _} <- maybe_refund_edited_reward(task),
+         {:ok, subject} <- maybe_reserve_edited_reward(new_account, amount, task.id) do
+      {:ok,
+       changeset
+       |> Ecto.Changeset.put_change(:funding_node_id, node_id)
+       |> Ecto.Changeset.put_change(:reward_status, if(amount > 0, do: "reserved", else: "none"))
+       |> Ecto.Changeset.put_change(:reward_subject_uri, subject)}
+    end
+  end
+
+  defp maybe_refund_edited_reward(%Task{reward_status: "reserved", reward_amount: amount} = task)
+       when amount > 0,
+       do: Grains.refund_business(Repo, reward_account(task), amount, reward_subject(task))
+
+  defp maybe_refund_edited_reward(_task), do: {:ok, nil}
+
+  defp maybe_reserve_edited_reward(_account, 0, _task_id), do: {:ok, nil}
+
+  defp maybe_reserve_edited_reward(account, amount, task_id) do
+    subject = "rice://tasks/#{task_id}/edits/#{Rice.Tsid.generate()}"
+
+    case Grains.reserve_business(Repo, account, amount, subject) do
+      {:ok, _} -> {:ok, subject}
+      error -> error
+    end
+  end
+
+  defp task_snapshot(task) do
+    %{
+      "node_id" => task.node_id,
+      "node_name" => Repo.get!(Rice.Community.Node, task.node_id).name,
+      "title" => task.title,
+      "description" => task.description,
+      "organizer_contact" => task.organizer_contact,
+      "requirement" => task.requirement,
+      "application_deadline" => task.application_deadline,
+      "execution_deadline" => task.execution_deadline,
+      "reward_amount" => task.reward_amount,
+      "funding_node_id" => task.funding_node_id,
+      "attachment_ids" => Enum.map(task.image_links, & &1.attachment_id)
+    }
+  end
+
+  defp require_edit_node(_user, node_id, node_id), do: :ok
+
+  defp require_edit_node(user, _old_node_id, new_node_id) do
+    case publishing_node(user, new_node_id) do
+      {:ok, _} -> :ok
+      error -> error
+    end
   end
 
   defp update_current_draft(
@@ -923,7 +1044,7 @@ defmodule Rice.Tasks do
       [status: "open", reward_status: "reserved", funding_node_id: task.node_id],
       reward_detail(task, :reserved),
       fn repo, _changes ->
-        Grains.reserve_business(repo, reward_account(task), amount, "rice://tasks/#{task.id}")
+        Grains.reserve_business(repo, reward_account(task), amount, reward_subject(task))
       end
     }
   end
@@ -936,7 +1057,7 @@ defmodule Rice.Tasks do
       [status: status, reward_status: "refunded"],
       reward_detail(task, :refunded),
       fn repo, _changes ->
-        Grains.refund_business(repo, reward_account(task), amount, "rice://tasks/#{task.id}")
+        Grains.refund_business(repo, reward_account(task), amount, reward_subject(task))
       end
     }
   end
@@ -957,7 +1078,7 @@ defmodule Rice.Tasks do
           reward_account(task),
           assignee_id,
           amount,
-          "rice://tasks/#{task.id}"
+          reward_subject(task)
         )
       end
     }
@@ -967,6 +1088,8 @@ defmodule Rice.Tasks do
 
   defp reward_account(%Task{funding_node_id: nil, creator_id: id}), do: id
   defp reward_account(%Task{funding_node_id: id}), do: {:node, id}
+  defp reward_subject(%Task{reward_subject_uri: nil, id: id}), do: "rice://tasks/#{id}"
+  defp reward_subject(%Task{reward_subject_uri: subject}), do: subject
 
   defp reward_detail(%Task{reward_amount: amount} = task, action) when amount > 0 do
     case action do
