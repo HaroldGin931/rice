@@ -30,12 +30,17 @@ defmodule RiceWeb.Api.TaskJSON do
   end
 
   defp data(task, current_user, detail?) do
-    applications = loaded(task.applications)
-    submissions = loaded(task.submissions)
+    all_applications = loaded(task.applications)
+    applications = Enum.filter(all_applications, &(&1.round == task.round))
+    past_applications = Enum.reject(all_applications, &(&1.round == task.round))
+    all_submissions = loaded(task.submissions)
+    submissions = Enum.filter(all_submissions, &(&1.round == task.round))
+    past_submissions = Enum.reject(all_submissions, &(&1.round == task.round))
     events = loaded(task.events)
 
     %{
       id: task.id,
+      round: task.round,
       title: task.title,
       description: task.description,
       organizer_contact: task.organizer_contact,
@@ -66,7 +71,10 @@ defmodule RiceWeb.Api.TaskJSON do
       my_application: my_application(task, applications, current_user, detail?),
       allowed_actions: allowed_actions(task, applications, current_user),
       applications: visible_applications(task, applications, current_user, detail?),
+      past_applications:
+        visible_past_applications(task, past_applications, current_user, detail?),
       submissions: visible_submissions(task, submissions, current_user, detail?),
+      past_submissions: visible_past_submissions(task, past_submissions, current_user, detail?),
       events: if(detail?, do: visible_events(task, events, current_user), else: nil),
       published_at: published_at(task, events),
       inserted_at: task.inserted_at,
@@ -79,6 +87,14 @@ defmodule RiceWeb.Api.TaskJSON do
 
   defp visible_applications(_task, _applications, _user, _detail?), do: nil
 
+  defp visible_past_applications(task, applications, %User{id: user_id} = user, true) do
+    applications
+    |> Enum.filter(&(Rice.Tasks.can_manage?(task, user) || &1.user_id == user_id))
+    |> Enum.map(&application(&1, task))
+  end
+
+  defp visible_past_applications(_task, _applications, _user, _detail?), do: nil
+
   defp visible_submissions(task, submissions, %User{id: user_id} = user, true),
     do:
       if(user_id == task.assignee_id || Rice.Tasks.can_manage?(task, user),
@@ -87,9 +103,18 @@ defmodule RiceWeb.Api.TaskJSON do
 
   defp visible_submissions(_task, _submissions, _user, _detail?), do: nil
 
+  defp visible_past_submissions(task, submissions, %User{id: user_id} = user, true) do
+    submissions
+    |> Enum.filter(&(Rice.Tasks.can_manage?(task, user) || &1.user_id == user_id))
+    |> Enum.map(&submission(&1, task))
+  end
+
+  defp visible_past_submissions(_task, _submissions, _user, _detail?), do: nil
+
   defp application(%Application{} = application, task, detail? \\ true) do
     %{
       id: application.id,
+      round: application.round,
       reason: application.reason,
       status: application_status(application, task),
       user: public_user(application.user),
@@ -103,6 +128,7 @@ defmodule RiceWeb.Api.TaskJSON do
   defp submission(%Submission{} = submission, task) do
     %{
       id: submission.id,
+      round: submission.round,
       body: submission.body,
       status: submission_status(submission, task),
       review_reason: submission.review_reason,
@@ -166,7 +192,7 @@ defmodule RiceWeb.Api.TaskJSON do
     []
     |> maybe_add(task.status == "draft" and manager?, "publish")
     |> maybe_add(
-      task.status in ~w(draft open in_progress overdue under_review) and
+      task.status in ~w(draft open in_progress overdue under_review completed expired cancelled) and
         Rice.Tasks.can_edit?(task, user),
       "edit"
     )
@@ -205,6 +231,9 @@ defmodule RiceWeb.Api.TaskJSON do
     end
   end
 
+  defp application_status(%Application{final_status: status}, _task) when not is_nil(status),
+    do: status
+
   defp application_status(%Application{user_id: id}, %{assignee_id: id}), do: "appointed"
 
   defp application_status(%Application{rejected_at: rejected_at}, _task)
@@ -218,6 +247,9 @@ defmodule RiceWeb.Api.TaskJSON do
   defp application_status(_application, %{status: "expired"}), do: "expired"
   defp application_status(_application, _task), do: "not_selected"
 
+  defp submission_status(%Submission{final_status: status}, _task) when not is_nil(status),
+    do: status
+
   defp submission_status(%Submission{review_reason: reason}, _task) when not is_nil(reason),
     do: "changes_requested"
 
@@ -230,7 +262,12 @@ defmodule RiceWeb.Api.TaskJSON do
   defp published_at(%{status: "draft"}, _events), do: nil
 
   defp published_at(task, events) do
-    case Enum.find(events, &(&1.to_status == "open" and &1.detail != "状态记录从这里开始")) do
+    case events
+         |> Enum.filter(
+           &(&1.to_status == "open" and &1.from_status != "open" and
+               &1.detail != "状态记录从这里开始")
+         )
+         |> List.last() do
       nil -> task.inserted_at
       event -> event.inserted_at
     end

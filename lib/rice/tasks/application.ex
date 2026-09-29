@@ -6,6 +6,8 @@ defmodule Rice.Tasks.Application do
     field(:reason, :string, default: "")
     field(:contact, :string)
     field(:rejected_at, :utc_datetime_usec)
+    field(:round, :integer, default: 1)
+    field(:final_status, :string)
 
     belongs_to(:task, Rice.Tasks.Task)
     belongs_to(:user, Rice.Accounts.User)
@@ -21,7 +23,7 @@ defmodule Rice.Tasks.Application do
     |> validate_required([:contact])
     |> validate_length(:contact, max: 256)
     |> validate_length(:reason, max: 512)
-    |> unique_constraint([:task_id, :user_id])
+    |> unique_constraint([:task_id, :round, :user_id])
   end
 
   defp trim(value) when is_binary(value), do: String.trim(value)

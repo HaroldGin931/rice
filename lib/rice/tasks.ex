@@ -183,7 +183,9 @@ defmodule Rice.Tasks do
 
   defp update_current_published(user, task, attrs) do
     with true <- can_edit?(task, user) or {:error, :forbidden},
-         true <- task.status in ~w(open in_progress overdue under_review) or {:error, :conflict} do
+         true <-
+           task.status in ~w(open in_progress overdue under_review completed expired cancelled) or
+             {:error, :conflict} do
       attrs = Map.drop(attrs, ["client_request_id", :client_request_id])
       task = Repo.preload(task, :image_links)
       node_id = attrs["node_id"] || attrs[:node_id] || task.node_id
@@ -196,9 +198,58 @@ defmodule Rice.Tasks do
            {:ok, _} <- Ecto.Changeset.apply_action(changeset, :update) do
         before = task_snapshot(task)
         amount = Ecto.Changeset.get_field(changeset, :reward_amount)
-        changed_reward? = amount != task.reward_amount or node_id != task.node_id
+        application_deadline = Ecto.Changeset.get_field(changeset, :application_deadline)
 
-        with {:ok, changeset} <- revise_reward(task, changeset, amount, node_id, changed_reward?),
+        reopening? =
+          task.status in ~w(completed expired cancelled) and
+            (Ecto.Changeset.changed?(changeset, :application_deadline) or
+               Ecto.Changeset.changed?(changeset, :execution_deadline)) and
+            not is_nil(application_deadline) and
+            DateTime.compare(application_deadline, DateTime.utc_now()) == :gt
+
+        expiring? =
+          task.status == "open" and not is_nil(application_deadline) and
+            DateTime.compare(application_deadline, DateTime.utc_now()) != :gt
+
+        overdue? =
+          task.status == "in_progress" and
+            case Ecto.Changeset.get_field(changeset, :execution_deadline) do
+              nil -> false
+              deadline -> DateTime.compare(deadline, DateTime.utc_now()) != :gt
+            end
+
+        resuming? =
+          task.status == "overdue" and
+            Ecto.Changeset.changed?(changeset, :execution_deadline) and
+            case Ecto.Changeset.get_field(changeset, :execution_deadline) do
+              nil -> false
+              deadline -> DateTime.compare(deadline, DateTime.utc_now()) == :gt
+            end
+
+        changed_reward? = amount != task.reward_amount or node_id != task.node_id or reopening?
+
+        with {:ok, changeset} <-
+               if(task.status in ~w(completed expired cancelled) and not reopening?,
+                 do: stage_terminal_payer(task, changeset, node_id),
+                 else:
+                   revise_reward(
+                     task,
+                     changeset,
+                     amount,
+                     node_id,
+                     changed_reward? and not expiring?
+                   )
+               ),
+             {:ok, changeset} <- expire_edited_task(task, changeset, expiring?, amount, node_id),
+             :ok <- maybe_begin_next_round(task, reopening?),
+             changeset <-
+               changeset
+               |> Ecto.Changeset.put_change(
+                 :status,
+                 next_edited_status(task.status, reopening?, expiring?, overdue?, resuming?)
+               )
+               |> maybe_reset_assignee(reopening?)
+               |> maybe_advance_round(task.round, reopening?),
              {:ok, saved} <- Repo.update(changeset) do
           saved = Repo.preload(saved, :image_links, force: true)
           after_snapshot = task_snapshot(saved)
@@ -210,8 +261,8 @@ defmodule Rice.Tasks do
                   task_id: task.id,
                   actor_id: user.id,
                   from_status: task.status,
-                  to_status: task.status,
-                  detail: "编辑了任务",
+                  to_status: saved.status,
+                  detail: if(reopening?, do: "编辑并重新开放任务", else: "编辑了任务"),
                   before: before,
                   after: after_snapshot
                 })
@@ -220,7 +271,10 @@ defmodule Rice.Tasks do
               {:ok, nil}
             end
 
-          with {:ok, _} <- history, do: {:ok, preload_detail(saved)}
+          with {:ok, _} <- history,
+               :ok <- maybe_notify_edited_due(task, saved, expiring?, overdue?) do
+            {:ok, preload_detail(saved)}
+          end
         end
       end
     else
@@ -229,23 +283,165 @@ defmodule Rice.Tasks do
     end
   end
 
+  defp next_edited_status(_status, true, _, _, _), do: "open"
+  defp next_edited_status(_status, _, true, _, _), do: "expired"
+  defp next_edited_status(_status, _, _, true, _), do: "overdue"
+  defp next_edited_status(_status, _, _, _, true), do: "in_progress"
+  defp next_edited_status(status, _, _, _, _), do: status
+
+  defp maybe_reset_assignee(changeset, false), do: changeset
+
+  defp maybe_reset_assignee(changeset, true) do
+    changeset
+    |> Ecto.Changeset.put_change(:assignee_id, nil)
+    |> Ecto.Changeset.put_change(:appointed_at, nil)
+    |> Ecto.Changeset.put_change(:appointment_reason, nil)
+  end
+
+  defp maybe_advance_round(changeset, _round, false), do: changeset
+
+  defp maybe_advance_round(changeset, round, true),
+    do: Ecto.Changeset.put_change(changeset, :round, round + 1)
+
+  defp expire_edited_task(_task, changeset, false, _amount, _node_id), do: {:ok, changeset}
+
+  defp expire_edited_task(task, changeset, true, amount, node_id) do
+    case maybe_refund_edited_reward(task) do
+      {:ok, _} ->
+        {:ok,
+         changeset
+         |> Ecto.Changeset.put_change(
+           :reward_status,
+           if(amount > 0 and task.reward_status == "reserved", do: "refunded", else: "none")
+         )
+         |> Ecto.Changeset.put_change(
+           :funding_node_id,
+           if(node_id == task.node_id, do: task.funding_node_id, else: node_id)
+         )}
+
+      error ->
+        error
+    end
+  end
+
+  defp maybe_begin_next_round(_task, false), do: :ok
+
+  defp maybe_begin_next_round(task, true) do
+    applications =
+      Repo.all(from a in Application, where: a.task_id == ^task.id and a.round == ^task.round)
+
+    submissions =
+      Repo.all(from s in Submission, where: s.task_id == ^task.id and s.round == ^task.round)
+
+    with :ok <- archive_applications(task, applications),
+         :ok <- archive_submissions(task, submissions) do
+      Enum.reduce_while(applications, :ok, fn application, _ ->
+        cloned =
+          %Application{
+            task_id: task.id,
+            user_id: application.user_id,
+            round: task.round + 1,
+            contact: application.contact,
+            reason: application.reason
+          }
+
+        case Repo.insert(cloned) do
+          {:ok, _} -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+    end
+  end
+
+  defp archive_applications(task, applications) do
+    Enum.reduce_while(applications, :ok, fn application, _ ->
+      status = previous_application_status(task, application)
+
+      case Repo.update(Ecto.Changeset.change(application, final_status: status)) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp archive_submissions(task, submissions) do
+    Enum.reduce_while(submissions, :ok, fn submission, _ ->
+      status = previous_submission_status(task, submission)
+
+      case Repo.update(Ecto.Changeset.change(submission, final_status: status)) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp previous_application_status(%Task{assignee_id: user_id}, %Application{user_id: user_id})
+       when not is_nil(user_id),
+       do: "appointed"
+
+  defp previous_application_status(_task, %Application{rejected_at: rejected_at})
+       when not is_nil(rejected_at),
+       do: "not_selected"
+
+  defp previous_application_status(%Task{status: status}, _application)
+       when status in ["cancelled", "expired"],
+       do: status
+
+  defp previous_application_status(_task, _application), do: "not_selected"
+
+  defp previous_submission_status(_task, %Submission{review_reason: reason})
+       when not is_nil(reason),
+       do: "changes_requested"
+
+  defp previous_submission_status(%Task{status: "completed"}, _submission), do: "approved"
+  defp previous_submission_status(_task, _submission), do: "pending"
+
+  defp maybe_notify_edited_due(_old, _saved, false, false), do: :ok
+
+  defp maybe_notify_edited_due(old, saved, expiring?, overdue?) do
+    recipients =
+      cond do
+        expiring? ->
+          Enum.map(applicant_ids(Repo, old), &{&1, "task_expired", "申请已截止"})
+
+        overdue? ->
+          [{old.assignee_id, "task_overdue", @overdue_detail}]
+      end
+
+    Enum.reduce_while(recipients, :ok, fn {recipient_id, event, detail}, _ ->
+      case Repo.insert(notification_changeset(saved, recipient_id, old.creator_id, event, detail)) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
   defp revise_reward(_task, changeset, _amount, _node_id, false),
     do: {:ok, changeset}
 
   defp revise_reward(task, changeset, amount, node_id, true) do
     old_account = reward_account(task)
-    new_account = {:node, node_id}
+    new_account = if(node_id == task.node_id, do: old_account, else: {:node, node_id})
     Grains.lock_business_accounts(Repo, [old_account, new_account])
 
     with {:ok, _} <- maybe_refund_edited_reward(task),
          {:ok, subject} <- maybe_reserve_edited_reward(new_account, amount, task.id) do
       {:ok,
        changeset
-       |> Ecto.Changeset.put_change(:funding_node_id, node_id)
+       |> Ecto.Changeset.put_change(
+         :funding_node_id,
+         if(node_id == task.node_id, do: task.funding_node_id, else: node_id)
+       )
        |> Ecto.Changeset.put_change(:reward_status, if(amount > 0, do: "reserved", else: "none"))
        |> Ecto.Changeset.put_change(:reward_subject_uri, subject)}
     end
   end
+
+  defp stage_terminal_payer(%Task{node_id: node_id}, changeset, node_id),
+    do: {:ok, changeset}
+
+  defp stage_terminal_payer(_task, changeset, node_id),
+    do: {:ok, Ecto.Changeset.put_change(changeset, :funding_node_id, node_id)}
 
   defp maybe_refund_edited_reward(%Task{reward_status: "reserved", reward_amount: amount} = task)
        when amount > 0,
@@ -275,6 +471,7 @@ defmodule Rice.Tasks do
       "application_deadline" => task.application_deadline,
       "execution_deadline" => task.execution_deadline,
       "reward_amount" => task.reward_amount,
+      "round" => task.round,
       "funding_node_id" => task.funding_node_id,
       "attachment_ids" => Enum.map(task.image_links, & &1.attachment_id)
     }
@@ -361,7 +558,7 @@ defmodule Rice.Tasks do
 
       notifications =
         fn repo ->
-          Enum.map(applicant_ids(repo, task.id), &{&1, creator_id, "task_cancelled", nil})
+          Enum.map(applicant_ids(repo, task), &{&1, creator_id, "task_cancelled", nil})
         end
 
       transition_task(
@@ -387,18 +584,25 @@ defmodule Rice.Tasks do
     if can_manage?(task, user) do
       {:error, :forbidden}
     else
-      application =
-        Application.create_changeset(%Application{task_id: task.id, user_id: user.id}, attrs)
-
       Multi.new()
       |> Multi.run(:task, fn repo, _ -> lock_open_task(repo, task.id, now) end)
-      |> Multi.run(:existing_application, fn repo, _ ->
-        {:ok, repo.get_by(Application, task_id: task.id, user_id: user.id)}
+      |> Multi.run(:existing_application, fn repo, %{task: current_task} ->
+        {:ok,
+         repo.get_by(Application,
+           task_id: task.id,
+           round: current_task.round,
+           user_id: user.id
+         )}
       end)
-      |> Multi.run(:application, fn repo, %{existing_application: existing} ->
+      |> Multi.run(:application, fn repo, %{task: current_task, existing_application: existing} ->
         case existing do
-          nil -> repo.insert(application)
-          existing -> {:ok, existing}
+          nil ->
+            %Application{task_id: task.id, round: current_task.round, user_id: user.id}
+            |> Application.create_changeset(attrs)
+            |> repo.insert()
+
+          existing ->
+            {:ok, existing}
         end
       end)
       |> Multi.run(:application_event, fn repo, %{existing_application: existing} ->
@@ -430,7 +634,7 @@ defmodule Rice.Tasks do
   def appoint(user, %Task{} = task, application_id, attrs \\ %{}) do
     with_locked_task(task.id, fn current ->
       with :ok <- authorize_management(current, user),
-           {:ok, application} <- fetch_record(Application, current.id, application_id) do
+           {:ok, application} <- fetch_record(Application, current, application_id) do
         appoint_application(user, current, application, attrs)
       end
     end)
@@ -439,7 +643,7 @@ defmodule Rice.Tasks do
   def reject_application(user, %Task{} = task, application_id) do
     with_locked_task(task.id, fn current ->
       with :ok <- authorize_management(current, user),
-           {:ok, application} <- fetch_record(Application, current.id, application_id) do
+           {:ok, application} <- fetch_record(Application, current, application_id) do
         reject_current_application(user, current, application)
       end
     end)
@@ -502,7 +706,8 @@ defmodule Rice.Tasks do
             pending_ids =
               repo.all(
                 from a in Application,
-                  where: a.task_id == ^task.id and is_nil(a.rejected_at),
+                  where:
+                    a.task_id == ^task.id and a.round == ^task.round and is_nil(a.rejected_at),
                   select: a.user_id
               )
 
@@ -549,7 +754,10 @@ defmodule Rice.Tasks do
     from_status = if newly_overdue?, do: "overdue", else: status
 
     changeset =
-      Submission.create_changeset(%Submission{task_id: task.id, user_id: user_id}, attrs)
+      Submission.create_changeset(
+        %Submission{task_id: task.id, round: task.round, user_id: user_id},
+        attrs
+      )
 
     Multi.new()
     |> maybe_mark_overdue(task, newly_overdue?, now)
@@ -614,7 +822,7 @@ defmodule Rice.Tasks do
   def approve_result(user, %Task{} = task, submission_id) do
     with_locked_task(task.id, fn current_task ->
       with :ok <- authorize_management(current_task, user),
-           {:ok, submission} <- fetch_record(Submission, current_task.id, submission_id) do
+           {:ok, submission} <- fetch_record(Submission, current_task, submission_id) do
         approve_submission(user, current_task, submission)
       end
     end)
@@ -644,7 +852,7 @@ defmodule Rice.Tasks do
   def request_changes(user, %Task{} = task, submission_id, reason) do
     with_locked_task(task.id, fn current_task ->
       with :ok <- authorize_management(current_task, user),
-           {:ok, submission} <- fetch_record(Submission, current_task.id, submission_id) do
+           {:ok, submission} <- fetch_record(Submission, current_task, submission_id) do
         request_submission_changes(user, current_task, submission, reason)
       end
     end)
@@ -738,7 +946,7 @@ defmodule Rice.Tasks do
       nil,
       detail,
       fn repo ->
-        Enum.map(applicant_ids(repo, task.id), &{&1, task.creator_id, "task_expired", detail})
+        Enum.map(applicant_ids(repo, task), &{&1, task.creator_id, "task_expired", detail})
       end,
       reward_step
     )
@@ -860,7 +1068,9 @@ defmodule Rice.Tasks do
 
     applied =
       from a in Application,
-        where: a.task_id == parent_as(:task).id and a.user_id == ^id,
+        where:
+          a.task_id == parent_as(:task).id and a.round == parent_as(:task).round and
+            a.user_id == ^id,
         select: 1
 
     from(t in query,
@@ -884,9 +1094,10 @@ defmodule Rice.Tasks do
       from(e in Event,
         where:
           e.to_status == "open" and
+            (is_nil(e.from_status) or e.from_status != "open") and
             (is_nil(e.detail) or e.detail != "状态记录从这里开始"),
         group_by: e.task_id,
-        select: %{task_id: e.task_id, cursor: min(e.id)}
+        select: %{task_id: e.task_id, cursor: max(e.id)}
       )
 
     query =
@@ -959,8 +1170,17 @@ defmodule Rice.Tasks do
           (t.status != "draft" and not is_nil(t.funding_node_id) and t.node_id in ^ids)
   end
 
-  defp scope_mine(query, %User{id: id}, "assigned"),
-    do: from(t in query, where: t.assignee_id == ^id)
+  defp scope_mine(query, %User{id: id}, "assigned") do
+    previous_assignment =
+      from(a in Application,
+        where:
+          a.task_id == parent_as(:task).id and a.user_id == ^id and
+            a.final_status == "appointed",
+        select: 1
+      )
+
+    from(t in query, where: t.assignee_id == ^id or exists(previous_assignment))
+  end
 
   defp scope_mine(query, %User{id: id}, "applied") do
     application =
@@ -1121,8 +1341,13 @@ defmodule Rice.Tasks do
     end)
   end
 
-  defp applicant_ids(repo, task_id) do
-    repo.all(from(a in Application, where: a.task_id == ^task_id, select: a.user_id))
+  defp applicant_ids(repo, task) do
+    repo.all(
+      from(a in Application,
+        where: a.task_id == ^task.id and a.round == ^task.round,
+        select: a.user_id
+      )
+    )
   end
 
   defp lock_open_task(repo, task_id, now) do
@@ -1167,9 +1392,9 @@ defmodule Rice.Tasks do
     |> String.replace("_", "\\_")
   end
 
-  defp fetch_record(schema, task_id, id) do
+  defp fetch_record(schema, task, id) do
     if Rice.Tsid.valid?(id) do
-      case Repo.get_by(schema, id: id, task_id: task_id) do
+      case Repo.get_by(schema, id: id, task_id: task.id, round: task.round) do
         nil -> {:error, :not_found}
         record -> {:ok, record}
       end

@@ -5,6 +5,8 @@ defmodule Rice.Tasks.Submission do
   schema "task_submissions" do
     field(:body, :string)
     field(:review_reason, :string)
+    field(:round, :integer, default: 1)
+    field(:final_status, :string)
 
     belongs_to(:task, Rice.Tasks.Task)
     belongs_to(:user, Rice.Accounts.User)

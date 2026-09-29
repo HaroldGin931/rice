@@ -20,7 +20,8 @@ defmodule Rice.Events do
         "applied" when not is_nil(user) ->
           from(e in query,
             join: a in Application,
-            on: a.event_id == e.id and a.user_id == ^user.id
+            on: a.event_id == e.id and a.user_id == ^user.id,
+            distinct: true
           )
 
         "managed" when not is_nil(user) ->
@@ -71,7 +72,9 @@ defmodule Rice.Events do
             from a in Application,
               join: u in User,
               on: u.id == a.user_id,
-              where: u.did == ^did and a.status == "approved",
+              join: e in Event,
+              on: e.id == a.event_id,
+              where: u.did == ^did and a.status == "approved" and a.round == e.round,
               select: a.event_id
 
           where(query, [e], e.id in subquery(participating))
@@ -211,7 +214,8 @@ defmodule Rice.Events do
 
   defp update_published!(user, event, attrs) do
     require!(can_edit?(event, user), :forbidden)
-    require!(event.status in ["open", "in_progress"])
+    terminal? = event.status in ["completed", "cancelled"]
+    require!(event.status in ["open", "in_progress"] or terminal?)
     event = Repo.preload(event, :image_links)
     node_id = attrs["node_id"] || event.node_id
     if node_id != event.node_id, do: require_node!(user, node_id)
@@ -224,15 +228,44 @@ defmodule Rice.Events do
 
     unwrap!(Changeset.apply_action(changeset, :update))
 
-    approved =
-      Repo.aggregate(
-        from(a in Application, where: a.event_id == ^event.id and a.status == "approved"),
-        :count
-      )
+    now = DateTime.utc_now()
+    deadline = Changeset.get_field(changeset, :application_deadline)
+    starts_at = Changeset.get_field(changeset, :starts_at)
 
-    require!(approved <= Changeset.get_field(changeset, :capacity), :capacity_full)
+    reopening? =
+      terminal? and not is_nil(event.published_at) and
+        Enum.any?(
+          [:application_deadline, :starts_at, :ends_at],
+          &Changeset.changed?(changeset, &1)
+        ) and before?(now, deadline) and
+        before?(now, starts_at)
+
+    unless reopening? do
+      approved =
+        Repo.aggregate(
+          from(a in Application,
+            where: a.event_id == ^event.id and a.round == ^event.round and a.status == "approved"
+          ),
+          :count
+        )
+
+      require!(approved <= Changeset.get_field(changeset, :capacity), :capacity_full)
+    end
+
     before = event_snapshot(event)
+
+    changeset =
+      if reopening?,
+        do:
+          Changeset.change(changeset,
+            status: "open",
+            round: event.round + 1,
+            published_at: DateTime.utc_now()
+          ),
+        else: changeset
+
     saved = changeset |> Repo.update() |> unwrap!() |> Repo.preload(:image_links, force: true)
+    if reopening?, do: carry_applicants_forward!(event, saved, user.id)
     after_snapshot = event_snapshot(saved)
 
     if before != after_snapshot do
@@ -241,15 +274,90 @@ defmodule Rice.Events do
           event_id: event.id,
           actor_id: user.id,
           action: "edited",
+          round: saved.round,
           from_status: event.status,
-          to_status: event.status,
+          to_status: saved.status,
           before: before,
           after: after_snapshot
         })
       )
     end
 
-    saved
+    if event.status == "open" and not before?(now, saved.starts_at),
+      do: start_locked!(saved, now),
+      else: saved
+  end
+
+  defp carry_applicants_forward!(before, after_event, actor_id) do
+    prior =
+      if before.status == "cancelled" do
+        Repo.all(
+          from(a in Application,
+            join: h in EventHistory,
+            on:
+              h.application_id == a.id and h.round == ^before.round and
+                h.action == "application_cancelled",
+            where:
+              a.event_id == ^before.id and a.round == ^before.round and a.status == "cancelled" and
+                h.from_status in ["pending", "approved"],
+            order_by: a.user_id,
+            select: {a, h.from_status}
+          )
+        )
+      else
+        Repo.all(
+          from(a in Application,
+            where:
+              a.event_id == ^before.id and a.round == ^before.round and a.status == "approved",
+            order_by: a.user_id,
+            select: {a, "approved"}
+          )
+        )
+      end
+
+    require!(
+      Enum.count(prior, fn {_, status} -> status == "approved" end) <= after_event.capacity,
+      :capacity_full
+    )
+
+    lock_accounts!(Enum.map(prior, fn {old, _} -> old.user_id end))
+
+    Enum.each(prior, fn {old, status} ->
+      application =
+        unwrap!(
+          Repo.insert(%Application{
+            event_id: after_event.id,
+            user_id: old.user_id,
+            round: after_event.round,
+            reason: old.reason,
+            contact: old.contact,
+            status: status,
+            fee_amount: after_event.fee_amount,
+            settlement_node_id: after_event.settlement_node_id,
+            payment_status: if(after_event.fee_amount > 0, do: "reserved", else: "none")
+          })
+        )
+
+      if application.fee_amount > 0,
+        do:
+          unwrap!(
+            Grains.reserve_business(
+              Repo,
+              old.user_id,
+              application.fee_amount,
+              subject(application)
+            )
+          )
+
+      record!(after_event, actor_id, application.id, "application_renewed", nil, status)
+
+      detail =
+        if application.fee_amount > 0,
+          do: "活动新一期已开启，报名费已重新冻结",
+          else: "活动新一期已开启，申请已延续"
+
+      notify!(after_event, old.user_id, actor_id, "event_application_renewed", detail)
+    end)
   end
 
   defp event_snapshot(event) do
@@ -265,6 +373,7 @@ defmodule Rice.Events do
       "ends_at" => event.ends_at,
       "fee_amount" => event.fee_amount,
       "capacity" => event.capacity,
+      "round" => event.round,
       "settlement_node_id" => event.settlement_node_id,
       "attachment_ids" => Enum.map(event.image_links, & &1.attachment_id)
     }
@@ -295,7 +404,9 @@ defmodule Rice.Events do
   def apply(user, event, attrs) do
     with_event(event.id, fn current ->
       require!(current.creator_id != user.id and not can_manage?(current, user), :forbidden)
-      existing = Repo.get_by(Application, event_id: current.id, user_id: user.id)
+
+      existing =
+        Repo.get_by(Application, event_id: current.id, round: current.round, user_id: user.id)
 
       if existing do
         current
@@ -316,6 +427,7 @@ defmodule Rice.Events do
                 %Application{
                   event_id: current.id,
                   user_id: user.id,
+                  round: current.round,
                   fee_amount: current.fee_amount,
                   settlement_node_id: current.settlement_node_id,
                   payment_status: if(current.fee_amount > 0, do: "reserved", else: "none")
@@ -442,7 +554,9 @@ defmodule Rice.Events do
         applications =
           Repo.all(
             from(a in Application,
-              where: a.event_id == ^current.id and a.status == "approved",
+              where:
+                a.event_id == ^current.id and a.round == ^current.round and
+                  a.status == "approved",
               order_by: a.user_id
             )
           )
@@ -498,10 +612,13 @@ defmodule Rice.Events do
   def allowed_actions(event, user) do
     now = DateTime.utc_now()
     host? = can_manage?(event, user)
-    own = Enum.find(event.applications, &(&1.user_id == user.id))
+    current = Enum.filter(event.applications, &(&1.round == event.round))
+    own = Enum.find(current, &(&1.user_id == user.id))
 
     [
-      {"edit", can_edit?(event, user) and event.status in ["draft", "open", "in_progress"]},
+      {"edit",
+       can_edit?(event, user) and
+         event.status in ["draft", "open", "in_progress", "completed", "cancelled"]},
       {"publish", host? and event.status == "draft"},
       {"cancel", host? and event.status in ["draft", "open", "in_progress"]},
       {"finish",
@@ -509,7 +626,7 @@ defmodule Rice.Events do
       {"apply",
        not host? and event.creator_id != user.id and is_nil(own) and event.status == "open" and
          before?(now, event.application_deadline) and before?(now, event.starts_at) and
-         Enum.count(event.applications, &(&1.status == "approved")) < event.capacity}
+         Enum.count(current, &(&1.status == "approved")) < event.capacity}
     ]
     |> Enum.filter(&elem(&1, 1))
     |> Enum.map(&elem(&1, 0))
@@ -519,6 +636,9 @@ defmodule Rice.Events do
 
   def application_actions(event, application, user) do
     cond do
+      application.round != event.round ->
+        []
+
       application.user_id == user.id and application.status == "pending" and
         event.status == "open" and before?(DateTime.utc_now(), event.starts_at) ->
         ["withdraw"]
@@ -527,9 +647,12 @@ defmodule Rice.Events do
         cond do
           application.status == "pending" and event.status == "open" and
               before?(DateTime.utc_now(), event.starts_at) ->
-            if Enum.count(event.applications, &(&1.status == "approved")) < event.capacity,
-              do: ["approve", "reject"],
-              else: ["reject"]
+            if Enum.count(
+                 event.applications,
+                 &(&1.round == event.round and &1.status == "approved")
+               ) < event.capacity,
+               do: ["approve", "reject"],
+               else: ["reject"]
 
           application.status == "approved" and event.status in ["open", "in_progress"] ->
             ["remove"]
@@ -550,7 +673,7 @@ defmodule Rice.Events do
       pending =
         Repo.all(
           from(a in Application,
-            where: a.event_id == ^event.id and a.status == "pending",
+            where: a.event_id == ^event.id and a.round == ^event.round and a.status == "pending",
             order_by: a.user_id
           )
         )
@@ -612,7 +735,9 @@ defmodule Rice.Events do
     do:
       Repo.all(
         from(a in Application,
-          where: a.event_id == ^event.id and a.status in ["pending", "approved"],
+          where:
+            a.event_id == ^event.id and a.round == ^event.round and
+              a.status in ["pending", "approved"],
           order_by: a.user_id
         )
       )
@@ -624,14 +749,18 @@ defmodule Rice.Events do
 
   defp application!(event, id) do
     require!(Rice.Tsid.valid?(id), :not_found)
-    Repo.get_by(Application, id: id, event_id: event.id) || Repo.rollback(:not_found)
+
+    Repo.get_by(Application, id: id, event_id: event.id, round: event.round) ||
+      Repo.rollback(:not_found)
   end
 
   # Called only inside with_event's row lock, before creating an application or freezing its fee.
   defp require_capacity!(event) do
     count =
       Repo.aggregate(
-        from(a in Application, where: a.event_id == ^event.id and a.status == "approved"),
+        from(a in Application,
+          where: a.event_id == ^event.id and a.round == ^event.round and a.status == "approved"
+        ),
         :count
       )
 
@@ -706,6 +835,7 @@ defmodule Rice.Events do
     unwrap!(
       Repo.insert(%EventHistory{
         event_id: event.id,
+        round: event.round,
         actor_id: actor_id,
         application_id: application_id,
         action: action,

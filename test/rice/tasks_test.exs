@@ -529,8 +529,81 @@ defmodule Rice.TasksTest do
     assert is_nil(Repo.get_by(Rice.Grains.Receipt, subject_uri: new_uri, kind: "refunded"))
 
     assert {:ok, cancelled} = Tasks.cancel(publisher, edited)
-    assert {:error, :conflict} = Tasks.update_task(publisher, cancelled, %{title: "终态不能修改"})
+    assert {:ok, corrected} = Tasks.update_task(publisher, cancelled, %{title: "归档文字修正"})
+    assert corrected.status == "cancelled"
+
+    assert {:ok, staged} =
+             Tasks.update_task(publisher, corrected, %{
+               reward_amount: 70,
+               node_id: first_node.id
+             })
+
+    assert staged.status == "cancelled"
+    assert staged.round == 1
+    assert staged.reward_status == "refunded"
+    assert staged.funding_node_id == first_node.id
     assert Repo.get_by!(Rice.Grains.Receipt, subject_uri: new_uri, kind: "refunded").amount == 60
+    assert Repo.aggregate(Rice.Grains.Receipt, :count) == 4
+
+    assert {:ok, reopened} =
+             Tasks.update_task(publisher, staged, %{
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    assert reopened.status == "open"
+    assert reopened.round == 2
+    assert reopened.reward_amount == 70
+
+    assert Repo.get_by!(Rice.Grains.Receipt,
+             subject_uri: reopened.reward_subject_uri,
+             kind: "reserved"
+           ).from_node_id == first_node.id
+
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "取消后把申请截止改到将来会重新开放并冻结新一笔奖励" do
+    publisher = task_publisher_fixture()
+    node = funded_node_fixture(publisher, 100)
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "可重开任务",
+               description: "取消后重新开放",
+               organizer_contact: "社区服务台",
+               reward_amount: 40,
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    assert {:ok, cancelled} = Tasks.cancel(publisher, task)
+    assert cancelled.reward_status == "refunded"
+
+    assert {:ok, reopened} =
+             Tasks.update_task(publisher, cancelled, %{
+               application_deadline: DateTime.add(DateTime.utc_now(), 7200)
+             })
+
+    assert reopened.status == "open"
+    assert reopened.reward_status == "reserved"
+    assert reopened.reward_subject_uri != "rice://tasks/#{task.id}"
+
+    assert Repo.get_by!(Rice.Grains.Receipt,
+             subject_uri: "rice://tasks/#{task.id}",
+             kind: "refunded"
+           ).amount == 40
+
+    assert Repo.get_by!(Rice.Grains.Receipt,
+             subject_uri: reopened.reward_subject_uri,
+             kind: "reserved"
+           ).amount == 40
+
+    assert Repo.get!(Rice.Community.Node, node.id).grain_frozen_balance == 40
+
+    assert Enum.any?(
+             reopened.events,
+             &(&1.from_status == "cancelled" and &1.to_status == "open" and &1.before != nil)
+           )
+
     assert Rice.Grains.reconcile().ok?
   end
 
@@ -551,10 +624,289 @@ defmodule Rice.TasksTest do
     assert edited.title == "修正后的任务"
     assert edited.application_deadline == past
 
-    assert {:error, changeset} =
+    assert {:ok, corrected} =
              Tasks.update_task(publisher, edited, %{application_deadline: DateTime.add(past, -60)})
 
-    assert "领取截止时间必须在将来" in errors_on(changeset).application_deadline
+    assert corrected.status == "expired"
+    assert corrected.round == 1
+  end
+
+  test "重新开放任务创建新轮次，旧申请与交付记录仍可查且不可操作" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    other = user_fixture()
+    funded_node_fixture(publisher, 100)
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "两轮任务",
+               description: "保留旧记录",
+               organizer_contact: "社区服务台",
+               reward_amount: 40,
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    assert {:ok, old_application} = Tasks.apply(worker, task, %{contact: "旧联系方式"})
+    assert {:ok, rejected_application} = Tasks.apply(other, task, %{contact: "另一联系方式"})
+    assert {:ok, task} = Tasks.reject_application(publisher, task, rejected_application.id)
+    assert {:ok, cancelled} = Tasks.cancel(publisher, task)
+
+    assert {:ok, reopened} =
+             Tasks.update_task(publisher, cancelled, %{
+               application_deadline: DateTime.add(DateTime.utc_now(), 7200)
+             })
+
+    assert reopened.status == "open"
+    assert reopened.round == 2
+    assert length(reopened.applications) == 4
+    assert Repo.get!(Rice.Tasks.Application, old_application.id).final_status == "cancelled"
+
+    assert Repo.get!(Rice.Tasks.Application, rejected_application.id).final_status ==
+             "not_selected"
+
+    current = Enum.filter(reopened.applications, &(&1.round == 2))
+    assert Enum.sort(Enum.map(current, & &1.user_id)) == Enum.sort([worker.id, other.id])
+    assert Enum.all?(current, &is_nil(&1.rejected_at))
+    assert {:error, :not_found} = Tasks.appoint(publisher, reopened, old_application.id)
+    assert {:ok, repeated} = Tasks.apply(worker, reopened, %{contact: "不会覆盖复制的申请"})
+    assert repeated.id == Enum.find(current, &(&1.user_id == worker.id)).id
+
+    worker_data = RiceWeb.Api.TaskJSON.show(%{task: reopened, current_user: worker}).data
+    assert worker_data.application_count == 2
+    assert worker_data.my_application.id == repeated.id
+    assert [%{id: old_id, status: "cancelled", round: 1}] = worker_data.past_applications
+    assert old_id == old_application.id
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "已完成任务重新开放保留旧交付与发放流水，新轮次另行冻结" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    node = funded_node_fixture(publisher, 100)
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "可续办任务",
+               description: "第一轮完成后再开放",
+               organizer_contact: "社区服务台",
+               reward_amount: 40,
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    assert {:ok, old_application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
+    assert {:ok, assigned} = Tasks.appoint(publisher, task, old_application.id)
+    assert {:ok, review} = Tasks.submit_result(worker, assigned, %{body: "第一轮成果"})
+    [old_submission] = review.submissions
+    assert {:ok, completed} = Tasks.approve_result(publisher, review, old_submission.id)
+    assert completed.reward_status == "settled"
+
+    assert {:ok, corrected} = Tasks.update_task(publisher, completed, %{reward_amount: 0})
+    assert corrected.status == "completed"
+    assert corrected.reward_status == "settled"
+    assert Repo.aggregate(Rice.Grains.Receipt, :count) == 2
+    assert {:ok, corrected} = Tasks.update_task(publisher, corrected, %{reward_amount: 40})
+
+    assert {:ok, reopened} =
+             Tasks.update_task(publisher, corrected, %{
+               application_deadline: DateTime.add(DateTime.utc_now(), 7200)
+             })
+
+    assert reopened.round == 2
+    assert reopened.status == "open"
+    assert reopened.assignee_id == nil
+    assert reopened.reward_status == "reserved"
+    assert Repo.get!(Rice.Tasks.Submission, old_submission.id).final_status == "approved"
+    assert Repo.get!(Rice.Tasks.Application, old_application.id).final_status == "appointed"
+    assert {:error, :not_found} = Tasks.approve_result(publisher, reopened, old_submission.id)
+
+    assert Enum.any?(
+             Tasks.list_tasks(worker, %{"mine" => "assigned"}).entries,
+             &(&1.id == task.id)
+           )
+
+    old_uri = "rice://tasks/#{task.id}"
+    assert Repo.get_by!(Rice.Grains.Receipt, subject_uri: old_uri, kind: "settled").amount == 40
+
+    assert Repo.get_by!(Rice.Grains.Receipt,
+             subject_uri: reopened.reward_subject_uri,
+             kind: "reserved"
+           ).amount == 40
+
+    assert Repo.get!(Rice.Community.Node, node.id).grain_frozen_balance == 40
+    worker_data = RiceWeb.Api.TaskJSON.show(%{task: reopened, current_user: worker}).data
+    assert [%{id: old_id, status: "approved", round: 1}] = worker_data.past_submissions
+    assert old_id == old_submission.id
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "编辑任务使申请截止成为过去时，按旧约退款并结束当前轮次" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    old_node = funded_node_fixture(publisher, 100)
+    new_node = node_fixture(%{user_id: publisher.id})
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               node_id: old_node.id,
+               title: "临近截止任务",
+               description: "改期限时结束",
+               organizer_contact: "社区服务台",
+               reward_amount: 40,
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    assert {:ok, _} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
+
+    assert {:ok, expired} =
+             Tasks.update_task(publisher, task, %{
+               node_id: new_node.id,
+               reward_amount: 50,
+               application_deadline: DateTime.add(DateTime.utc_now(), -60)
+             })
+
+    assert expired.status == "expired"
+    assert expired.round == 1
+    assert expired.reward_status == "refunded"
+    assert expired.reward_amount == 50
+    assert expired.funding_node_id == new_node.id
+
+    assert Repo.get_by!(Rice.Grains.Receipt,
+             subject_uri: "rice://tasks/#{task.id}",
+             kind: "refunded"
+           ).amount == 40
+
+    assert Repo.aggregate(Rice.Grains.Receipt, :count) == 2
+    assert Repo.get!(Rice.Community.Node, old_node.id).grain_frozen_balance == 0
+    assert [%{event: "task_expired"}] = Tasks.list_notifications(worker)
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "无奖励任务编辑为过去截止和正数奖励时不伪造冻结或退款" do
+    publisher = task_publisher_fixture()
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "无旧奖励任务",
+               description: "只修订约定",
+               organizer_contact: "社区服务台",
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    assert {:ok, expired} =
+             Tasks.update_task(publisher, task, %{
+               reward_amount: 50,
+               application_deadline: DateTime.add(DateTime.utc_now(), -60)
+             })
+
+    assert expired.status == "expired"
+    assert expired.reward_amount == 50
+    assert expired.reward_status == "none"
+    assert Repo.aggregate(Rice.Grains.Receipt, :count) == 0
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "已超时任务延长交付时间后回到进行中" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "延长交付",
+               description: "按新期限恢复状态",
+               organizer_contact: "社区服务台",
+               execution_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    assert {:ok, application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
+    assert {:ok, assigned} = Tasks.appoint(publisher, task, application.id)
+
+    assert {:ok, overdue} =
+             Tasks.update_task(publisher, assigned, %{
+               execution_deadline: DateTime.add(DateTime.utc_now(), -60)
+             })
+
+    assert overdue.status == "overdue"
+    assert Enum.count(Tasks.list_notifications(worker), &(&1.event == "task_overdue")) == 1
+
+    assert {:ok, resumed} =
+             Tasks.update_task(publisher, overdue, %{
+               execution_deadline: DateTime.add(DateTime.utc_now(), 7200)
+             })
+
+    assert resumed.status == "in_progress"
+    assert resumed.round == 1
+    assert resumed.assignee_id == worker.id
+  end
+
+  test "已取消任务保留未来申请期限时，修改交付日期也开启新轮次" do
+    publisher = task_publisher_fixture()
+    worker = user_fixture()
+    funded_node_fixture(publisher, 60)
+
+    assert {:ok, task} =
+             Tasks.create_task(publisher, %{
+               title: "改交付时间重开",
+               description: "旧申请保留",
+               organizer_contact: "社区服务台",
+               reward_amount: 20,
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600),
+               execution_deadline: DateTime.add(DateTime.utc_now(), 7200)
+             })
+
+    assert {:ok, old_application} = Tasks.apply(worker, task, %{contact: "测试联系方式"})
+    assert {:ok, cancelled} = Tasks.cancel(publisher, task)
+
+    assert {:ok, reopened} =
+             Tasks.update_task(publisher, cancelled, %{
+               execution_deadline: DateTime.add(DateTime.utc_now(), 10_800)
+             })
+
+    assert reopened.status == "open"
+    assert reopened.round == 2
+    assert Repo.get!(Rice.Tasks.Application, old_application.id).final_status == "cancelled"
+    assert Enum.any?(reopened.applications, &(&1.round == 2 and &1.user_id == worker.id))
+    assert Rice.Grains.reconcile().ok?
+  end
+
+  test "旧个人出资任务只改奖励金额时仍由原发布者出资" do
+    publisher = task_publisher_fixture()
+    node = Repo.get_by!(Rice.Community.Node, user_id: publisher.id)
+    {:ok, _} = Rice.Grains.grant(publisher, 100)
+
+    task =
+      %Rice.Tasks.Task{
+        creator_id: publisher.id,
+        node_id: node.id,
+        status: "open",
+        reward_amount: 40,
+        reward_status: "reserved"
+      }
+      |> Rice.Tasks.Task.create_changeset(%{
+        title: "旧任务",
+        description: "旧个人奖励",
+        organizer_contact: "社区服务台"
+      })
+      |> Repo.insert!()
+
+    assert {:ok, _} =
+             Repo.transaction(fn ->
+               {:ok, receipt} =
+                 Rice.Grains.reserve_business(Repo, publisher.id, 40, "rice://tasks/#{task.id}")
+
+               receipt
+             end)
+
+    assert {:ok, edited} = Tasks.update_task(publisher, task, %{reward_amount: 50})
+    assert edited.funding_node_id == nil
+    assert edited.reward_amount == 50
+
+    assert Repo.get_by!(Rice.Grains.Receipt,
+             subject_uri: edited.reward_subject_uri,
+             kind: "reserved"
+           ).from_user_id == publisher.id
+
+    assert Repo.get!(Rice.Community.Node, node.id).grain_frozen_balance == 0
+    assert Rice.Grains.reconcile().ok?
   end
 
   test "申请截止未任命即失效并退款，24小时后只保留私有历史" do
@@ -835,5 +1187,36 @@ defmodule Rice.TasksTest do
 
     assert Enum.map(second.entries, & &1.id) == [older_public.id]
     assert second.next_cursor == nil
+  end
+
+  test "重新开放的任务按新一期发布时间排在旧任务之前" do
+    publisher = task_publisher_fixture()
+
+    assert {:ok, first} =
+             Tasks.create_task(publisher, %{
+               title: "第一份任务",
+               description: "第一期",
+               organizer_contact: "社区服务台",
+               application_deadline: DateTime.add(DateTime.utc_now(), 3600)
+             })
+
+    second = task_fixture(publisher, %{title: "后来发布的任务"})
+    assert {:ok, cancelled} = Tasks.cancel(publisher, first)
+
+    assert {:ok, reopened} =
+             Tasks.update_task(publisher, cancelled, %{
+               application_deadline: DateTime.add(DateTime.utc_now(), 7200)
+             })
+
+    assert Enum.map(Tasks.list_tasks(nil, %{"sort" => "published"}).entries, & &1.id) == [
+             reopened.id,
+             second.id
+           ]
+
+    reopen_event =
+      Enum.find(reopened.events, &(&1.from_status == "cancelled" and &1.to_status == "open"))
+
+    assert RiceWeb.Api.TaskJSON.show(%{task: reopened}).data.published_at ==
+             reopen_event.inserted_at
   end
 end

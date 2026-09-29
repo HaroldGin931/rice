@@ -6,6 +6,7 @@ defmodule Rice.Events.EventHistory do
     field :action, :string
     field :from_status, :string
     field :to_status, :string
+    field :round, :integer, default: 1
     field :before, :map
     field :after, :map
     belongs_to :event, Rice.Events.Event

@@ -8,6 +8,7 @@ defmodule Rice.Events.Event do
     field :organizer_contact, :string
     field :location, :string
     field :status, :string, default: "draft"
+    field :round, :integer, default: 1
     field :application_deadline, :utc_datetime_usec
     field :starts_at, :utc_datetime_usec
     field :ends_at, :utc_datetime_usec
@@ -87,8 +88,7 @@ defmodule Rice.Events.Event do
     changeset
     |> require_time(
       is_nil(deadline) or
-        (Keyword.get(opts, :published_edit, false) and
-           not Map.has_key?(changeset.changes, :application_deadline)) or
+        Keyword.get(opts, :published_edit, false) or
         DateTime.compare(deadline, DateTime.utc_now()) == :gt,
       :application_deadline,
       "报名截止时间必须在将来"

@@ -20,6 +20,7 @@ defmodule Rice.Tasks.Task do
     field(:reward_amount, :integer, default: 0)
     field(:reward_status, :string, default: "none")
     field(:reward_subject_uri, :string)
+    field(:round, :integer, default: 1)
     field(:search_cursor, :string, virtual: true)
 
     belongs_to(:creator, Rice.Accounts.User)
@@ -89,8 +90,7 @@ defmodule Rice.Tasks.Task do
     application = get_field(changeset, :application_deadline)
 
     if deadline &&
-         (((not Keyword.get(opts, :published_edit, false) or
-              changed?(changeset, :execution_deadline)) and
+         ((not Keyword.get(opts, :published_edit, false) and
              DateTime.compare(deadline, DateTime.utc_now()) != :gt) ||
             (application && DateTime.compare(deadline, application) != :gt)),
        do: add_error(changeset, :execution_deadline, "交付时间须晚于现在及申请截止时间"),
@@ -117,8 +117,7 @@ defmodule Rice.Tasks.Task do
         changeset
 
       deadline ->
-        if (Keyword.get(opts, :published_edit, false) and
-              not changed?(changeset, :application_deadline)) or
+        if Keyword.get(opts, :published_edit, false) or
              DateTime.compare(deadline, DateTime.utc_now()) == :gt,
            do: changeset,
            else: add_error(changeset, :application_deadline, "领取截止时间必须在将来")
